@@ -12,7 +12,7 @@ shopt -s inherit_errexit 2>/dev/null || true
 umask 077
 
 readonly ARCHI_PAYLOAD_ID='archi-network-reinstall-v1'
-readonly ARCHI_VERSION='0.7.2'
+readonly ARCHI_VERSION='0.8.0'
 readonly DEFAULT_ALPINE_MIRROR='https://dl-cdn.alpinelinux.org/alpine'
 # The pacman placeholders must remain literal until the installer writes mirrorlist.
 readonly DEFAULT_PACKAGE_MIRROR="https://geo.mirror.pkgbuild.com/\$repo/os/\$arch"
@@ -53,6 +53,7 @@ Stage options:
   --alpine-mirror URL          Alpine mirror root containing latest-stable.
   --iso-mirror URL             Deprecated alias for --alpine-mirror.
   --package-mirror URL         Pacman mirror containing $repo/os/$arch.
+  --authorized-key "KEY"       Use a literal root SSH public key.
   --authorized-key-file FILE   File containing the root SSH public key.
   --authorized-keys-url URL    Download the root SSH public key before staging.
   --disk DEVICE                Whole target disk, for example /dev/vda.
@@ -85,8 +86,9 @@ Stage options:
                                Continue there with:
                                ARCHI_FORCE_INSTALL=1 /root/archi.sh
   --power-off                  Power off instead of reboot after installation.
-  --reboot                     Reboot immediately after staging.
-  --yes                        Required together with --reboot.
+  --reboot                     Compatibility option; reboot is already the default.
+  --yes                        Compatibility option; destructive run is already confirmed.
+  --no-reboot                  Stage GRUB but wait for a manual reboot.
   --force-low-memory           Allow staging with less than 384 MiB RAM.
   --dry-run                    Validate and print the plan without changing files.
   --cleanup                    Remove the staged GRUB entry and downloaded files.
@@ -515,6 +517,16 @@ first_public_key() {
     ' "$file"
 }
 
+first_public_key_text() {
+    printf '%s\n' "$1" | awk '
+        /^[[:space:]]*#/ || /^[[:space:]]*$/ { next }
+        /(^|[[:space:]])(ssh-ed25519|ssh-rsa|ecdsa-sha2-nistp(256|384|521))[[:space:]]/ {
+            print
+            exit
+        }
+    '
+}
+
 probe_url() {
     local label=$1 url=$2
     log "Checking $label: $url"
@@ -593,6 +605,7 @@ cleanup_stage() {
 stage_main() {
     local alpine_mirror=$DEFAULT_ALPINE_MIRROR
     local package_mirror=$DEFAULT_PACKAGE_MIRROR
+    local authorized_key_literal=''
     local authorized_key_file=''
     local authorized_keys_url=''
     local disk=''
@@ -612,7 +625,7 @@ stage_main() {
     local boot_mode='auto'
     local grub_timeout=5
     local install_dir=$DEFAULT_INSTALL_DIR
-    local hold=false power_off=false reboot_now=false assume_yes=false
+    local hold=false power_off=false reboot_now=true assume_yes=true
     local force_low_memory=false dry_run=false cleanup=false
 
     if [[ -r /root/.ssh/authorized_keys ]]; then
@@ -629,6 +642,7 @@ stage_main() {
             --tuna) alpine_mirror=$TUNA_ALPINE_MIRROR; package_mirror=$TUNA_PACKAGE_MIRROR; dns='119.29.29.29 223.5.5.5'; ntp='time.amazonaws.cn'; shift ;;
             --alpine-mirror|--iso-mirror) alpine_mirror=${2:?missing value}; shift 2 ;;
             --package-mirror) package_mirror=${2:?missing value}; shift 2 ;;
+            --authorized-key|--ssh-key) authorized_key_literal=${2:?missing value}; shift 2 ;;
             --authorized-key-file) authorized_key_file=${2:?missing value}; shift 2 ;;
             --authorized-keys-url) authorized_keys_url=${2:?missing value}; shift 2 ;;
             --disk) disk=${2:?missing value}; shift 2 ;;
@@ -663,6 +677,7 @@ stage_main() {
             --power-off) power_off=true; shift ;;
             --reboot) reboot_now=true; shift ;;
             --yes) assume_yes=true; shift ;;
+            --no-reboot) reboot_now=false; shift ;;
             --force-low-memory) force_low_memory=true; shift ;;
             --force-lowmem)
                 [[ ${2:-} == 0 || ${2:-} == 1 || ${2:-} == 2 ]] ||
@@ -699,15 +714,15 @@ stage_main() {
     validate_url '--alpine-mirror' "$alpine_mirror"
     validate_url '--package-mirror' "$package_mirror"
     local authorized_key_tmp=''
-    if [[ -n $authorized_keys_url ]]; then
+    if [[ -z $authorized_key_literal && -n $authorized_keys_url ]]; then
         validate_url '--authorized-keys-url' "$authorized_keys_url"
         authorized_key_tmp=$(mktemp)
         trap 'rm -f -- "${authorized_key_tmp:-}"' EXIT
         download_file "$authorized_keys_url" "$authorized_key_tmp" 40
         authorized_key_file=$authorized_key_tmp
     fi
-    [[ -n $authorized_key_file ]] ||
-        die 'Provide --authorized-key-file or --authorized-keys-url'
+    [[ -n $authorized_key_literal || -n $authorized_key_file ]] ||
+        die 'Provide --authorized-key, --authorized-key-file, or --authorized-keys-url'
     validate_hostname "$hostname"
     validate_packages "$extra_packages"
     validate_port "$ssh_port"
@@ -741,8 +756,13 @@ stage_main() {
     fi
 
     local authorized_key
-    authorized_key=$(first_public_key "$authorized_key_file")
-    [[ -n $authorized_key ]] || die "No supported SSH public key found in $authorized_key_file"
+    if [[ -n $authorized_key_literal ]]; then
+        authorized_key=$(first_public_key_text "$authorized_key_literal")
+        [[ -n $authorized_key ]] || die 'No supported SSH public key found in --authorized-key'
+    else
+        authorized_key=$(first_public_key "$authorized_key_file")
+        [[ -n $authorized_key ]] || die "No supported SSH public key found in $authorized_key_file"
+    fi
 
     local boot_interface bootif
     read -r boot_interface bootif < <(detect_bootif "$requested_interface")
@@ -836,6 +856,7 @@ stage_main() {
   GRUB timeout:      ${grub_timeout}s
   extra packages:    ${extra_packages:-none}
   hold before wipe:  $hold
+  reboot after stage: $reboot_now
   stage directory:   $install_dir
 EOF
     if [[ $dry_run == true ]]; then

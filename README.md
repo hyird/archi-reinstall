@@ -26,7 +26,7 @@
 - 至少 8 GiB 磁盘；建议临时环境至少 512 MiB 内存。
 - staging 主机需提供 Bash、curl、cpio、gzip、GRUB 工具和常见磁盘/网络命令。
 
-安装会清空 `--disk` 指定的整块磁盘。建议先运行 `--dry-run`，并确认控制台或 SSH 公钥可用。
+安装会清空自动探测或 `--disk` 指定的整块磁盘。默认 staging 完成后立即重启并开始安装；建议先运行 `--dry-run`，并确认控制台或 SSH 公钥可用。
 
 ## 快速使用
 
@@ -40,23 +40,20 @@ chmod +x archi.sh
   --disk /dev/vda
 ```
 
-准备下一次启动，但暂不自动重启：
+默认自动探测当前根磁盘，并在 staging 后立即重启：
 
 ```bash
 ./archi.sh \
-  --authorized-key-file /root/.ssh/authorized_keys \
-  --disk /dev/vda
-
-reboot
+  --authorized-key "ssh-ed25519 AAAA... user@example" \
+  --fail2ban
 ```
 
-确认擦盘并直接 staging、重启、安装：
+如果只准备启动项、暂不重启：
 
 ```bash
 ./archi.sh \
   --authorized-key-file /root/.ssh/authorized_keys \
-  --disk /dev/vda \
-  --reboot --yes
+  --no-reboot
 ```
 
 ## 受限出口与中国大陆镜像
@@ -68,8 +65,7 @@ reboot
   --tuna \
   --authorized-key-file /root/.ssh/authorized_keys \
   --disk /dev/vda \
-  --timezone Asia/Shanghai \
-  --reboot --yes
+  --timezone Asia/Shanghai
 ```
 
 可选预设：
@@ -97,7 +93,6 @@ tail -f /tmp/archi-install.log
   --hold \
   --authorized-key-file /root/.ssh/authorized_keys \
   --disk /dev/vda
-reboot
 ```
 
 检查无误后在 Alpine 中继续：
@@ -116,6 +111,7 @@ ARCHI_FORCE_INSTALL=1 /root/archi.sh
 | `--timezone ZONE` | 最终时区；默认 `UTC` |
 | `--ip CIDR` / `--netmask` / `--gateway` / `--interface` | 覆盖自动探测的静态网络 |
 | `--dns "ADDR ..."` / `--ntp HOST` | 覆盖 DNS 和 NTP |
+| `--authorized-key "KEY"` | 直接传入完整 SSH 公钥字符串 |
 | `--authorized-keys-url URL` | staging 时下载并嵌入 root 公钥 |
 | `--ssh-port PORT` | 同时设置 Alpine 和最终 Arch 的 SSH 端口 |
 | `--cloud-kernel` | 恢复默认云配置：`linux-lts` 且不装 firmware |
@@ -129,6 +125,7 @@ ARCHI_FORCE_INSTALL=1 /root/archi.sh
 | `--swap-mib N` | 显式创建 N MiB swap；默认 0 |
 | `--bios` / `--efi` | 覆盖自动检测的启动模式 |
 | `--power-off` | 安装成功后关机而非重启 |
+| `--no-reboot` | 只完成 staging，等待手动重启 |
 
 完整列表请运行 `./archi.sh --help`。
 
