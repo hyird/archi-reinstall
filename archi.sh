@@ -12,7 +12,7 @@ shopt -s inherit_errexit 2>/dev/null || true
 umask 077
 
 readonly ARCHI_PAYLOAD_ID='archi-network-reinstall-v1'
-readonly ARCHI_VERSION='0.6.1'
+readonly ARCHI_VERSION='0.6.2'
 readonly DEFAULT_ALPINE_MIRROR='https://dl-cdn.alpinelinux.org/alpine'
 # The pacman placeholders must remain literal until the installer writes mirrorlist.
 readonly DEFAULT_PACKAGE_MIRROR="https://geo.mirror.pkgbuild.com/\$repo/os/\$arch"
@@ -1222,7 +1222,15 @@ EOF
     if grep -qsE '[[:space:]]/mnt/boot[[:space:]]' /proc/mounts; then
         umount /mnt/boot
     fi
-    umount /mnt
+    local unmounted=false
+    for _ in 1 2 3 4 5; do
+        if umount /mnt; then
+            unmounted=true
+            break
+        fi
+        sleep 1
+    done
+    [[ $unmounted == true ]] || die 'Target root remained busy after five unmount attempts'
     log 'Arch Linux installation completed successfully'
 
     trap - ERR
