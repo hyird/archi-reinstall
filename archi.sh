@@ -1,22 +1,27 @@
 #!/usr/bin/env bash
-# archi.sh - GRUB-staged, unattended Arch Linux network reinstall
+# archi.sh - Alpine-staged, unattended Arch Linux pacstrap reinstall
 #
 # The same file has two modes:
-#   1. On the existing Linux system it stages the official ArchISO kernel and
-#      initramfs in /boot and creates a one-time GRUB entry.
-#   2. An appended initramfs overlay copies this exact file into the official
-#      ArchISO userspace and starts it as a systemd service.
+#   1. On the existing Linux system it stages Alpine's official virt netboot
+#      kernel/initramfs and creates a one-time GRUB entry.
+#   2. An embedded apkovl installs only official Alpine packages, starts SSH,
+#      and runs this exact file to pacstrap a pure Arch system to the target.
 
 set -Eeuo pipefail
 shopt -s inherit_errexit 2>/dev/null || true
 umask 077
 
 readonly ARCHI_PAYLOAD_ID='archi-network-reinstall-v1'
-readonly ARCHI_VERSION='0.4.0'
-readonly DEFAULT_ISO_MIRROR='https://geo.mirror.pkgbuild.com/iso/latest'
+readonly ARCHI_VERSION='0.6.0'
+readonly DEFAULT_ALPINE_MIRROR='https://dl-cdn.alpinelinux.org/alpine'
 # The pacman placeholders must remain literal until the installer writes mirrorlist.
-# shellcheck disable=SC2016
-readonly DEFAULT_PACKAGE_MIRROR='https://geo.mirror.pkgbuild.com/$repo/os/$arch'
+readonly DEFAULT_PACKAGE_MIRROR="https://geo.mirror.pkgbuild.com/\$repo/os/\$arch"
+readonly TUNA_ALPINE_MIRROR='https://mirrors.tuna.tsinghua.edu.cn/alpine'
+readonly TUNA_PACKAGE_MIRROR="https://mirrors.tuna.tsinghua.edu.cn/archlinux/\$repo/os/\$arch"
+readonly USTC_ALPINE_MIRROR='https://mirrors.ustc.edu.cn/alpine'
+readonly USTC_PACKAGE_MIRROR="https://mirrors.ustc.edu.cn/archlinux/\$repo/os/\$arch"
+readonly ALIYUN_ALPINE_MIRROR='https://mirrors.aliyun.com/alpine'
+readonly ALIYUN_PACKAGE_MIRROR="https://mirrors.aliyun.com/archlinux/\$repo/os/\$arch"
 readonly DEFAULT_INSTALL_DIR='/boot/archi-reinstall'
 readonly GRUB_ENTRY_FILE='/etc/grub.d/42_archi_reinstall'
 readonly GRUB_DEFAULT_FILE='/etc/default/grub.d/zz-archi-reinstall.cfg'
@@ -41,33 +46,58 @@ Usage:
   archi.sh --cleanup [--install-dir DIR]
 
 Stage options:
-  --iso-mirror URL             Arch ISO "latest" directory.
+  --cloudflare                 Use Cloudflare DNS/NTP with official mirrors.
+  --aliyun                    Use Aliyun Arch mirrors, AliDNS and China NTP.
+  --ustc, --china             Use USTC Arch mirrors, DNSPod and China NTP.
+  --tuna                      Use TUNA Arch mirrors, DNSPod and China NTP.
+  --alpine-mirror URL          Alpine mirror root containing latest-stable.
+  --iso-mirror URL             Deprecated alias for --alpine-mirror.
   --package-mirror URL         Pacman mirror containing $repo/os/$arch.
   --authorized-key-file FILE   File containing the root SSH public key.
+  --authorized-keys-url URL    Download the root SSH public key before staging.
   --disk DEVICE                Whole target disk, for example /dev/vda.
-  --hostname NAME              Installed hostname (default: current hostname).
+  --hostname NAME              Installed hostname (default: arch).
   --timezone ZONE              Installed timezone (default: UTC).
+  --interface DEVICE           Source interface (default: current default route).
+  --ip ADDRESS/CIDR            Override the inherited static IPv4 address.
+  --netmask MASK               Netmask used when --ip has no CIDR prefix.
+  --gateway ADDRESS            Override the inherited IPv4 gateway.
+  --static-ipv4                Explicitly request the default inherit-current mode.
   --dns "ADDR ..."             DNS servers written to systemd-networkd config.
+  --ntp HOST                  NTP server (default: time.cloudflare.com).
+  --ssh-port PORT             SSH port in Alpine and installed Arch (default: 22).
+  --bbr                       Enable fq + TCP BBR in the installed system.
+  --firmware                  Install linux-firmware (off by default for cloud VMs).
+  --cloud-kernel              Re-apply the default cloud kernel/profile.
+  --ethx                      Use eth0-style names (default, official udev method).
+  --predictable-names         Keep systemd predictable interface names.
+  --network-console           Compatibility alias; Alpine SSH is always enabled.
   --kernel PACKAGE             linux or linux-lts (default: linux-lts).
   --extra-packages "PKG ..."   Extra official repository packages.
-  --swap-mib N                 Swap file size in MiB (default: 1024, 0 disables).
+  --install "PKG ..."          debi-compatible alias for --extra-packages.
+  --swap-mib N                 Swap file size in MiB (default: 0, disabled).
   --boot-mode MODE             auto, bios, or efi (default: auto).
+  --bios, --efi                debi-compatible boot-mode aliases.
+  --grub-timeout N            GRUB menu timeout after installation (default: 5).
   --install-dir DIR            Staging directory under /boot.
-  --hold                       Boot ArchISO, enable key-only SSH, but do not wipe.
+  --hold                       Boot Alpine, enable key-only SSH, but do not wipe.
                                Continue there with:
                                ARCHI_FORCE_INSTALL=1 /root/archi.sh
   --power-off                  Power off instead of reboot after installation.
   --reboot                     Reboot immediately after staging.
   --yes                        Required together with --reboot.
-  --force-low-memory           Allow staging with less than 1500 MiB RAM.
+  --force-low-memory           Allow staging with less than 384 MiB RAM.
   --dry-run                    Validate and print the plan without changing files.
   --cleanup                    Remove the staged GRUB entry and downloaded files.
   --help                       Show this help.
   --version                    Show script version.
 
-The target must be x86_64, use GRUB 2, have wired IPv4 connectivity, and have
-enough RAM for the network live image (2 GiB minimum recommended). The official
-ArchISO kernel/initramfs is used directly; archi.sh only appends its own overlay.
+The target must be x86_64, use GRUB 2, and have wired IPv4 connectivity.
+512 MiB RAM is recommended for the Alpine installer. Defaults are
+cloud-first: hostname arch, linux-lts, eth0-style naming, QEMU guest agent,
+key-only root SSH, static-network inheritance, and no large firmware bundle. The official
+Alpine kernel/initramfs, modloop and APK repositories are used directly; the
+final operating system is installed with pacstrap from the selected Arch mirror.
 EOF
 }
 
@@ -97,6 +127,29 @@ validate_packages() {
     for package in $1; do
         [[ $package =~ ^[A-Za-z0-9@._+-]+$ ]] || die "Invalid package name: $package"
     done
+}
+
+is_ipv4() {
+    local value=$1 octet
+    local -a octets
+    [[ $value =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || return 1
+    IFS=. read -r -a octets <<< "$value"
+    for octet in "${octets[@]}"; do
+        ((10#$octet <= 255)) || return 1
+    done
+}
+
+validate_dns_servers() {
+    local server
+    for server in $1; do
+        is_ipv4 "$server" || die "Invalid IPv4 DNS server: $server"
+    done
+}
+
+validate_port() {
+    if ! [[ $1 =~ ^[0-9]+$ ]] || ! ((10#$1 >= 1 && 10#$1 <= 65535)); then
+        die "Invalid SSH port: $1"
+    fi
 }
 
 encode_b64() {
@@ -143,11 +196,15 @@ detect_root_disk() {
 }
 
 detect_bootif() {
-    local interface='' interface_path mac=''
+    local requested=${1:-} interface='' interface_path mac=''
 
-    interface=$(ip -o route show default 2>/dev/null | awk '
-        { for (i = 1; i <= NF; i++) if ($i == "dev") { print $(i + 1); exit } }
-    ')
+    if [[ -n $requested && $requested != auto ]]; then
+        interface=$requested
+    else
+        interface=$(ip -4 route get 1.1.1.1 2>/dev/null | awk '
+            { for (i = 1; i <= NF; i++) if ($i == "dev") { print $(i + 1); exit } }
+        ')
+    fi
     if [[ -z $interface ]]; then
         for interface_path in /sys/class/net/*; do
             [[ ${interface_path##*/} == lo ]] && continue
@@ -184,198 +241,243 @@ prefix_to_netmask() {
     printf '%s\n' "$result"
 }
 
+netmask_to_prefix() {
+    local netmask=$1 octet prefix=0 partial=false bits
+    local -a octets
+    is_ipv4 "$netmask" || die "Invalid IPv4 netmask: $netmask"
+    IFS=. read -r -a octets <<< "$netmask"
+    for octet in "${octets[@]}"; do
+        case $octet in
+            255) bits=8 ;;
+            254) bits=7 ;;
+            252) bits=6 ;;
+            248) bits=5 ;;
+            240) bits=4 ;;
+            224) bits=3 ;;
+            192) bits=2 ;;
+            128) bits=1 ;;
+            0) bits=0 ;;
+            *) die "Non-contiguous IPv4 netmask: $netmask" ;;
+        esac
+        if [[ $partial == true && $bits != 0 ]]; then
+            die "Non-contiguous IPv4 netmask: $netmask"
+        fi
+        (( bits < 8 )) && partial=true
+        prefix=$((prefix + bits))
+    done
+    printf '%s\n' "$prefix"
+}
+
 detect_dns_servers() {
-    local interface=$1 detected=''
-    if command -v resolvectl >/dev/null 2>&1; then
-        detected=$(resolvectl dns "$interface" 2>/dev/null | awk -F: '
-            NR == 1 { for (i = 2; i <= NF; i++) if ($i ~ /^[[:space:]]*[0-9]+(\.[0-9]+){3}[[:space:]]*$/) printf "%s ", $i }
-        ' || true)
-    fi
-    if [[ -z ${detected//[[:space:]]/} && -r /etc/resolv.conf ]]; then
-        detected=$(awk '
-            $1 == "nameserver" && $2 ~ /^[0-9]+(\.[0-9]+){3}$/ && $2 !~ /^127\./ { printf "%s ", $2 }
-        ' /etc/resolv.conf)
-    fi
-    printf '%s\n' "$detected"
+    local interface=$1 resolver_file
+    {
+        if command -v resolvectl >/dev/null 2>&1; then
+            resolvectl dns "$interface" || true
+        fi
+        if command -v nmcli >/dev/null 2>&1; then
+            nmcli --get-values IP4.DNS device show "$interface" || true
+        fi
+        for resolver_file in \
+            /run/systemd/resolve/resolv.conf \
+            /run/NetworkManager/no-stub-resolv.conf \
+            /run/NetworkManager/resolv.conf \
+            /run/resolvconf/resolv.conf \
+            /var/run/connman/resolv.conf \
+            /etc/resolv.conf; do
+            [[ -r $resolver_file ]] && awk '$1 == "nameserver" { print $2 }' "$resolver_file"
+        done
+    } 2>/dev/null | awk '
+        {
+            for (i = 1; i <= NF; i++) {
+                value = $i
+                gsub(/[,;]/, "", value)
+                if (value ~ /^[0-9]+(\.[0-9]+){3}$/ && value !~ /^127\./ && !seen[value]++) {
+                    printf "%s%s", separator, value
+                    separator = " "
+                }
+            }
+        }
+        END { print "" }
+    '
 }
 
 build_boot_network_parameter() {
-    local interface=$1 dns=$3 bootif=$4
-    local cidr address prefix gateway netmask dns0=''
-    cidr=$(ip -4 -o address show dev "$interface" scope global 2>/dev/null |
-        awk 'NR == 1 { print $4 }')
-    gateway=$(ip -4 route show default dev "$interface" 2>/dev/null | awk '
-        { for (i = 1; i <= NF; i++) if ($i == "via") { print $(i + 1); exit } }
-    ')
+    local interface=$1 hostname=$2 dns=$3 bootif=$4
+    local requested_cidr=${5:-} requested_gateway=${6:-}
+    local cidr address prefix gateway netmask dns0='' dns1=''
+    if [[ -n $requested_cidr ]]; then
+        cidr=$requested_cidr
+    else
+        cidr=$(ip -4 -o address show dev "$interface" scope global 2>/dev/null |
+            awk 'NR == 1 { print $4 }')
+    fi
+    if [[ -n $requested_gateway ]]; then
+        gateway=$requested_gateway
+    else
+        gateway=$(ip -4 route show default dev "$interface" 2>/dev/null | awk '
+            { for (i = 1; i <= NF; i++) if ($i == "via") { print $(i + 1); exit } }
+        ')
+    fi
     if [[ $cidr == */* && -n $gateway ]]; then
         address=${cidr%/*}
         prefix=${cidr#*/}
         netmask=$(prefix_to_netmask "$prefix")
-        read -r dns0 _ <<< "$dns"
+        read -r dns0 dns1 _ <<< "$dns"
         [[ -n $dns0 ]] || dns0=$gateway
-        # The ArchISO hook adds the selected BOOTIF device fields. Its ipconfig
-        # accepts this compact static form; our overlay writes DNS separately.
-        printf 'ip=%s:%s:%s:%s BOOTIF=%s\n' \
-            "$address" "$dns0" "$gateway" "$netmask" "$bootif"
+        # Alpine follows the kernel ip= client:server:gateway:mask:host:dev:
+        # autoconf:dns0:dns1 form. BOOTIF makes this survive interface renames.
+        printf 'ip=%s::%s:%s:%s::none:%s:%s BOOTIF=%s\n' \
+            "$address" "$gateway" "$netmask" "$hostname" "$dns0" "$dns1" "$bootif"
     else
         printf 'ip=dhcp BOOTIF=%s\n' "$bootif"
     fi
 }
 
-extract_archiso_initramfs() {
-    local image=$1 destination=$2
-    mkdir -p -- "$destination"
-    if command -v unmkinitramfs >/dev/null 2>&1; then
-        unmkinitramfs "$image" "$destination"
-    elif command -v lsinitcpio >/dev/null 2>&1; then
-        (cd "$destination" && lsinitcpio -x "$image")
-    else
-        die 'Need unmkinitramfs (Debian/Ubuntu: initramfs-tools-core) or lsinitcpio (Arch: mkinitcpio) to build the Arch overlay'
-    fi
-}
-
-build_archiso_overlay() {
-    local original=$1 destination=$2 authorized_key=$3
-    local work extracted overlay common_hook hook_count latehook_count overlay_archive
+build_alpine_initramfs() {
+    local original=$1 destination=$2 authorized_key=$3 hostname=$4 ssh_port=$5 dns=$6
+    local alpine_mirror=$7
+    local work apkovl overlay apkovl_archive overlay_archive dns_server
     work=$(mktemp -d)
-    extracted=$work/extracted
+    apkovl=$work/apkovl
     overlay=$work/overlay
+    apkovl_archive=$overlay/archi.apkovl.tar.gz
     overlay_archive=$work/archi-overlay.img
-    mkdir -p -- "$overlay/hooks" "$overlay/archi"
+    mkdir -p -- "$overlay" "$apkovl/etc/apk" "$apkovl/etc/ssh/sshd_config.d" \
+        "$apkovl/root/.ssh"
 
-    extract_archiso_initramfs "$original" "$extracted"
-    mapfile -t common_hooks < <(find "$extracted" -type f -path '*/hooks/archiso_pxe_common')
-    [[ ${#common_hooks[@]} -eq 1 ]] ||
-        die "Expected one archiso_pxe_common hook, found ${#common_hooks[@]}"
-    common_hook=${common_hooks[0]}
-    hook_count=$(grep -c '^run_hook() {' "$common_hook" || true)
-    latehook_count=$(grep -c '^run_latehook() {' "$common_hook" || true)
-    [[ $hook_count == 1 && $latehook_count == 1 ]] ||
-        die 'Unsupported ArchISO initramfs: network hook interface changed'
-
-    cp -f -- "$common_hook" "$overlay/hooks/archiso_pxe_common"
-    sed -i '0,/^run_hook() {/s//archi_original_run_hook() {/' \
-        "$overlay/hooks/archiso_pxe_common"
-    sed -i '0,/^run_latehook() {/s//archi_original_run_latehook() {/' \
-        "$overlay/hooks/archiso_pxe_common"
-    cat >> "$overlay/hooks/archiso_pxe_common" <<'ARCHI_HOOK'
-
-# Added by archi.sh. The compact static ipconfig form does not populate DNS, so
-# apply our validated resolver list before archiso_http downloads the live root.
-run_hook() {
-    archi_original_run_hook
-    if [ "$(getarg 'archi_mode')" = 'install' ]; then
-        archi_dns_csv="$(getarg 'archi_dns_csv')"
-        if [ -n "${archi_dns_csv}" ]; then
-            echo '# added by archi.sh overlay' >/etc/resolv.conf
-            old_ifs=${IFS}
-            IFS=,
-            for archi_dns in ${archi_dns_csv}; do
-                [ -n "${archi_dns}" ] && echo "nameserver ${archi_dns}" >>/etc/resolv.conf
-            done
-            IFS=${old_ifs}
-        fi
-    fi
-}
-
-# Keep the network that archiso_http configured and copy our payload into the
-# live root before initramfs switches to it.
-run_latehook() {
-    if [ "$(getarg 'archi_mode')" = 'install' ]; then
-        copytoram=n
-    fi
-    archi_original_run_latehook
-    if [ "$(getarg 'archi_mode')" = 'install' ]; then
-        /archi/prepare-root.sh /new_root
-    fi
-}
-ARCHI_HOOK
-
-    cp -f -- "${BASH_SOURCE[0]}" "$overlay/archi/archi.sh"
-    chmod 0700 "$overlay/archi/archi.sh"
-    printf '%s\n' "$authorized_key" > "$overlay/archi/authorized_keys"
-    chmod 0600 "$overlay/archi/authorized_keys"
-
-    cat > "$overlay/archi/prepare-root.sh" <<'PREPARE_ROOT'
-#!/usr/bin/ash
-set -eu
-
-new_root=${1:-/new_root}
-
-getarg_value() {
-    local wanted=$1 token
-    for token in $(cat /proc/cmdline); do
-        case $token in
-            "$wanted"=*) printf '%s' "${token#*=}"; return 0 ;;
-        esac
+    cat > "$apkovl/etc/apk/world" <<'EOF'
+alpine-base
+apk-tools
+arch-install-scripts
+bash
+ca-certificates
+curl
+dosfstools
+e2fsprogs
+findmnt
+gptfdisk
+lsblk
+openssh
+parted
+sgdisk
+tzdata
+util-linux-misc
+wipefs
+EOF
+    : > "$apkovl/etc/.default_boot_services"
+    printf '%s\n' "$hostname" > "$apkovl/etc/hostname"
+    cat > "$apkovl/etc/passwd" <<'EOF'
+root:x:0:0:root:/root:/bin/ash
+sshd:x:22:22:sshd:/var/empty:/sbin/nologin
+EOF
+    cat > "$apkovl/etc/group" <<'EOF'
+root:x:0:root
+wheel:x:10:root
+sshd:x:22:
+EOF
+    cat > "$apkovl/etc/shadow" <<'EOF'
+root:*:0:0:99999:7:::
+EOF
+    : > "$apkovl/etc/resolv.conf"
+    for dns_server in $dns; do
+        printf 'nameserver %s\n' "$dns_server" >> "$apkovl/etc/resolv.conf"
     done
-    return 1
-}
+    cat > "$apkovl/etc/apk/repositories" <<EOF
+$alpine_mirror/latest-stable/main
+$alpine_mirror/latest-stable/community
+EOF
+    printf '%s\n' \
+        "$alpine_mirror/latest-stable/releases/x86_64/netboot/modloop-virt" \
+        > "$apkovl/etc/archi-modloop-url"
+    cat > "$apkovl/etc/pacman.conf" <<'EOF'
+[options]
+Architecture = auto
+CheckSpace
+ParallelDownloads = 5
+SigLevel = Never
+LocalFileSigLevel = Optional
 
-install -Dm700 /archi/archi.sh "$new_root/root/archi.sh"
-install -dm700 "$new_root/root/.ssh"
-install -m600 /archi/authorized_keys "$new_root/root/.ssh/authorized_keys"
-install -dm755 "$new_root/etc/ssh/sshd_config.d"
-cat > "$new_root/etc/ssh/sshd_config.d/60-archi-key-only.conf" <<'SSH_CONFIG'
+[core]
+Include = /etc/pacman.d/mirrorlist
+
+[extra]
+Include = /etc/pacman.d/mirrorlist
+EOF
+    cat > "$apkovl/etc/ssh/sshd_config.d/60-archi-key-only.conf" <<EOF
+Port $ssh_port
 PermitRootLogin prohibit-password
 PasswordAuthentication no
 KbdInteractiveAuthentication no
-SSH_CONFIG
-
-install -dm755 "$new_root/etc/systemd/system/multi-user.target.wants"
-install -m644 /archi/archi-install.service "$new_root/etc/systemd/system/archi-install.service"
-ln -sf ../archi-install.service \
-    "$new_root/etc/systemd/system/multi-user.target.wants/archi-install.service"
-
-boot_cidr=$(getarg_value archi_boot_cidr || true)
-gateway=$(getarg_value archi_gateway || true)
-boot_mac=$(getarg_value archi_boot_mac || true)
-dns_csv=$(getarg_value archi_dns_csv || true)
-dns=${dns_csv//,/ }
-install -dm755 "$new_root/etc/systemd/network"
-if [ -n "$boot_cidr" ] && [ -n "$gateway" ] && [ -n "$boot_mac" ]; then
-    cat > "$new_root/etc/systemd/network/20-archi.network" <<NETWORK
-[Match]
-MACAddress=$boot_mac
-
-[Network]
-Address=$boot_cidr
-Gateway=$gateway
-DNS=$dns
-IPv6AcceptRA=yes
-NETWORK
+EOF
+    printf '%s\n' "$authorized_key" > "$apkovl/root/.ssh/authorized_keys"
+    cp -f -- "${BASH_SOURCE[0]}" "$apkovl/root/archi.sh"
+    cat > "$apkovl/root/archi-init" <<'EOF'
+#!/bin/sh
+set +e
+echo '[archi] Alpine installer init started.' >/dev/console
+hostname alpine
+mkdir -p /run/sshd /tmp /var/empty
+ln -sfn /proc/self/fd /dev/fd
+ln -sfn /proc/self/fd/0 /dev/stdin
+ln -sfn /proc/self/fd/1 /dev/stdout
+ln -sfn /proc/self/fd/2 /dev/stderr
+ln -sfn /proc/mounts /etc/mtab
+apk del alpine-base alpine-conf >/tmp/archi-apk-remove.log 2>&1
+apk add --no-cache arch-install-scripts bash ca-certificates curl dosfstools \
+    e2fsprogs findmnt lsblk openssh parted sgdisk tzdata wipefs >/tmp/archi-apk.log 2>&1
+apk_rc=$?
+echo "[archi] required APK exit status: $apk_rc" >/dev/console
+[ "$apk_rc" -eq 0 ] || cat /tmp/archi-apk.log >/dev/console
+mkdir -p /.modloop /lib
+curl --fail --location --retry 5 --output /tmp/modloop-virt \
+    "$(cat /etc/archi-modloop-url)" >/tmp/archi-modloop.log 2>&1
+modloop_rc=$?
+if [ "$modloop_rc" -eq 0 ]; then
+    mount -t squashfs -o loop,ro /tmp/modloop-virt /.modloop
+    ln -sfn /.modloop/modules /lib/modules
+    for module in virtio_scsi virtio_blk sd_mod ahci nvme ext4 vfat; do
+        modprobe "$module" >/dev/null 2>&1 || true
+    done
+    mdev -s >/dev/null 2>&1 || true
 else
-    cat > "$new_root/etc/systemd/network/20-archi.network" <<'NETWORK'
-[Match]
-Type=ether
-
-[Network]
-DHCP=yes
-IPv6AcceptRA=yes
-NETWORK
+    echo "[archi] modloop download failed with status $modloop_rc" >/dev/console
+    cat /tmp/archi-modloop.log >/dev/console
 fi
-chmod 0644 "$new_root/etc/systemd/network/20-archi.network"
-ln -sf /run/systemd/resolve/stub-resolv.conf "$new_root/etc/resolv.conf"
-PREPARE_ROOT
-    chmod 0755 "$overlay/archi/prepare-root.sh"
+ssh-keygen -A >/tmp/archi-ssh-keygen.log 2>&1
+ssh_keygen_rc=$?
+echo "[archi] ssh-keygen exit status: $ssh_keygen_rc" >/dev/console
+[ "$ssh_keygen_rc" -eq 0 ] || cat /tmp/archi-ssh-keygen.log >/dev/console
+/usr/sbin/sshd -E /tmp/archi-sshd.log
+sshd_rc=$?
+echo "[archi] sshd exit status: $sshd_rc" >/dev/console
+[ "$sshd_rc" -eq 0 ] || cat /tmp/archi-sshd.log >/dev/console
+echo '[archi] SSH should be ready. Follow installation with: tail -f /tmp/archi-install.log' >/dev/console
+/root/archi.sh </dev/console >/dev/console 2>&1 &
+installer_pid=$!
+while :; do
+    if ! kill -0 "$installer_pid" 2>/dev/null; then
+        wait "$installer_pid"
+        installer_rc=$?
+        echo "[archi] Installer exited with status $installer_rc; Alpine remains online." >/dev/console
+        installer_pid=0
+    fi
+    sleep 5 &
+    wait $!
+done
+EOF
+    chmod 0700 "$apkovl/root/archi-init"
+    find "$apkovl" -type d -exec chmod 0755 {} +
+    chmod 0700 "$apkovl/root" "$apkovl/root/.ssh" "$apkovl/root/archi.sh" \
+        "$apkovl/root/archi-init"
+    chmod 0600 "$apkovl/root/.ssh/authorized_keys"
+    chmod 0600 "$apkovl/etc/shadow"
+    chmod 0644 "$apkovl/etc/hostname" "$apkovl/etc/resolv.conf" \
+        "$apkovl/etc/passwd" "$apkovl/etc/group" "$apkovl/etc/apk/repositories" \
+        "$apkovl/etc/archi-modloop-url" \
+        "$apkovl/etc/pacman.conf" \
+        "$apkovl/etc/ssh/sshd_config.d/60-archi-key-only.conf"
 
-    cat > "$overlay/archi/archi-install.service" <<'ARCHI_SERVICE'
-[Unit]
-Description=archi.sh unattended Arch Linux installer
-Wants=network-online.target pacman-init.service
-After=network-online.target pacman-init.service
-ConditionKernelCommandLine=archi_mode=install
-
-[Service]
-Type=oneshot
-ExecStart=/root/archi.sh
-RemainAfterExit=yes
-StandardOutput=journal+console
-StandardError=journal+console
-
-[Install]
-WantedBy=multi-user.target
-ARCHI_SERVICE
+    (cd "$apkovl" && tar --numeric-owner --owner=0 --group=0 -czf "$apkovl_archive" .)
 
     (cd "$overlay" && find . -print0 | cpio --null --quiet -o -H newc | gzip -9) > "$overlay_archive"
     cat "$original" "$overlay_archive" > "${destination}.part"
@@ -471,22 +573,30 @@ cleanup_stage() {
 }
 
 stage_main() {
-    local iso_mirror=$DEFAULT_ISO_MIRROR
+    local alpine_mirror=$DEFAULT_ALPINE_MIRROR
     local package_mirror=$DEFAULT_PACKAGE_MIRROR
     local authorized_key_file=''
+    local authorized_keys_url=''
     local disk=''
-    local hostname
+    local hostname='arch'
     local timezone='UTC'
     local dns=''
+    local ntp='time.cloudflare.com'
+    local requested_interface='auto'
+    local requested_ip=''
+    local requested_netmask=''
+    local requested_gateway=''
+    local ssh_port=22
+    local bbr=false firmware=false ethx=true
     local kernel='linux-lts'
     local extra_packages=''
-    local swap_mib=1024
+    local swap_mib=0
     local boot_mode='auto'
+    local grub_timeout=5
     local install_dir=$DEFAULT_INSTALL_DIR
     local hold=false power_off=false reboot_now=false assume_yes=false
     local force_low_memory=false dry_run=false cleanup=false
 
-    hostname=$(hostname -s 2>/dev/null || printf 'archlinux')
     if [[ -r /root/.ssh/authorized_keys ]]; then
         authorized_key_file=/root/.ssh/authorized_keys
     elif [[ -n ${HOME:-} && -r $HOME/.ssh/authorized_keys ]]; then
@@ -495,23 +605,51 @@ stage_main() {
 
     while (($#)); do
         case $1 in
-            --iso-mirror) iso_mirror=${2:?missing value}; shift 2 ;;
+            --cloudflare) dns='1.1.1.1 1.0.0.1'; ntp='time.cloudflare.com'; shift ;;
+            --aliyun) alpine_mirror=$ALIYUN_ALPINE_MIRROR; package_mirror=$ALIYUN_PACKAGE_MIRROR; dns='223.5.5.5 223.6.6.6'; ntp='time.amazonaws.cn'; shift ;;
+            --ustc|--china) alpine_mirror=$USTC_ALPINE_MIRROR; package_mirror=$USTC_PACKAGE_MIRROR; dns='119.29.29.29 223.5.5.5'; ntp='time.amazonaws.cn'; shift ;;
+            --tuna) alpine_mirror=$TUNA_ALPINE_MIRROR; package_mirror=$TUNA_PACKAGE_MIRROR; dns='119.29.29.29 223.5.5.5'; ntp='time.amazonaws.cn'; shift ;;
+            --alpine-mirror|--iso-mirror) alpine_mirror=${2:?missing value}; shift 2 ;;
             --package-mirror) package_mirror=${2:?missing value}; shift 2 ;;
             --authorized-key-file) authorized_key_file=${2:?missing value}; shift 2 ;;
+            --authorized-keys-url) authorized_keys_url=${2:?missing value}; shift 2 ;;
             --disk) disk=${2:?missing value}; shift 2 ;;
             --hostname) hostname=${2:?missing value}; shift 2 ;;
             --timezone) timezone=${2:?missing value}; shift 2 ;;
+            --interface) requested_interface=${2:?missing value}; shift 2 ;;
+            --ip) requested_ip=${2:?missing value}; shift 2 ;;
+            --netmask) requested_netmask=${2:?missing value}; shift 2 ;;
+            --gateway) requested_gateway=${2:?missing value}; shift 2 ;;
+            --static-ipv4) shift ;;
             --dns) dns=${2:?missing value}; shift 2 ;;
+            --ntp) ntp=${2:?missing value}; shift 2 ;;
+            --ssh-port) ssh_port=${2:?missing value}; shift 2 ;;
+            --bbr) bbr=true; shift ;;
+            --firmware) firmware=true; shift ;;
+            --no-firmware) firmware=false; shift ;;
+            --cloud-kernel) kernel=linux-lts; firmware=false; shift ;;
+            --ethx) ethx=true; shift ;;
+            --predictable-names|--no-ethx) ethx=false; shift ;;
+            --network-console) shift ;;
             --kernel) kernel=${2:?missing value}; shift 2 ;;
-            --extra-packages) extra_packages=${2:?missing value}; shift 2 ;;
+            --extra-packages|--install) extra_packages=${2:?missing value}; shift 2 ;;
             --swap-mib) swap_mib=${2:?missing value}; shift 2 ;;
             --boot-mode) boot_mode=${2:?missing value}; shift 2 ;;
+            --bios) boot_mode=bios; shift ;;
+            --efi) boot_mode=efi; shift ;;
+            --grub-timeout) grub_timeout=${2:?missing value}; shift 2 ;;
             --install-dir) install_dir=${2:?missing value}; shift 2 ;;
             --hold) hold=true; shift ;;
             --power-off) power_off=true; shift ;;
             --reboot) reboot_now=true; shift ;;
             --yes) assume_yes=true; shift ;;
             --force-low-memory) force_low_memory=true; shift ;;
+            --force-lowmem)
+                [[ ${2:-} == 0 || ${2:-} == 1 || ${2:-} == 2 ]] ||
+                    die '--force-lowmem must be 0, 1, or 2'
+                [[ $2 != 0 ]] && force_low_memory=true
+                shift 2
+                ;;
             --dry-run) dry_run=true; shift ;;
             --cleanup) cleanup=true; shift ;;
             --version) printf '%s\n' "$ARCHI_VERSION"; return 0 ;;
@@ -536,15 +674,30 @@ stage_main() {
     need_cmd sha256sum
     need_cmd stat
 
-    [[ -n $authorized_key_file ]] || die '--authorized-key-file is required'
-    iso_mirror=$(trim_trailing_slash "$iso_mirror")
+    alpine_mirror=$(trim_trailing_slash "$alpine_mirror")
     package_mirror=$(trim_trailing_slash "$package_mirror")
-    validate_url '--iso-mirror' "$iso_mirror"
+    validate_url '--alpine-mirror' "$alpine_mirror"
     validate_url '--package-mirror' "$package_mirror"
+    local authorized_key_tmp=''
+    if [[ -n $authorized_keys_url ]]; then
+        validate_url '--authorized-keys-url' "$authorized_keys_url"
+        authorized_key_tmp=$(mktemp)
+        trap 'rm -f -- "${authorized_key_tmp:-}"' EXIT
+        download_file "$authorized_keys_url" "$authorized_key_tmp" 40
+        authorized_key_file=$authorized_key_tmp
+    fi
+    [[ -n $authorized_key_file ]] ||
+        die 'Provide --authorized-key-file or --authorized-keys-url'
     validate_hostname "$hostname"
     validate_packages "$extra_packages"
+    validate_port "$ssh_port"
+    [[ $ntp =~ ^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?$ ]] || die "Invalid NTP host: $ntp"
+    [[ $requested_interface == auto || $requested_interface =~ ^[A-Za-z0-9_.:-]+$ ]] ||
+        die "Invalid interface name: $requested_interface"
     [[ $kernel == linux || $kernel == linux-lts ]] || die '--kernel must be linux or linux-lts'
     [[ $swap_mib =~ ^[0-9]+$ ]] || die '--swap-mib must be a non-negative integer'
+    [[ $grub_timeout =~ ^[0-9]+$ && $grub_timeout -le 60 ]] ||
+        die '--grub-timeout must be an integer from 0 to 60'
     [[ $boot_mode == auto || $boot_mode == bios || $boot_mode == efi ]] ||
         die '--boot-mode must be auto, bios, or efi'
     [[ $timezone != *[[:space:]\'\"\\]* ]] || die 'Invalid timezone'
@@ -561,10 +714,10 @@ stage_main() {
 
     local mem_kib
     mem_kib=$(awk '/^MemTotal:/ {print $2}' /proc/meminfo)
-    if (( mem_kib < 1500000 )) && [[ $force_low_memory != true ]]; then
-        die "Only $((mem_kib / 1024)) MiB RAM detected; Arch netboot needs about 2 GiB. Use --force-low-memory to override"
-    elif (( mem_kib < 2000000 )); then
-        warn "Only $((mem_kib / 1024)) MiB RAM detected; ArchISO network boot may run out of memory"
+    if (( mem_kib < 384000 )) && [[ $force_low_memory != true ]]; then
+        die "Only $((mem_kib / 1024)) MiB RAM detected; the Alpine installer needs about 384 MiB. Use --force-low-memory to override"
+    elif (( mem_kib < 524288 )); then
+        warn "Only $((mem_kib / 1024)) MiB RAM detected; the Alpine installer may run out of memory"
     fi
 
     local authorized_key
@@ -572,28 +725,66 @@ stage_main() {
     [[ -n $authorized_key ]] || die "No supported SSH public key found in $authorized_key_file"
 
     local boot_interface bootif
-    read -r boot_interface bootif < <(detect_bootif)
+    read -r boot_interface bootif < <(detect_bootif "$requested_interface")
     bootif=${bootif^^}
-    if [[ -z $dns ]]; then dns=$(detect_dns_servers "$boot_interface"); fi
+    if [[ -z $dns ]]; then
+        dns=$(detect_dns_servers "$boot_interface")
+        [[ -n ${dns//[[:space:]]/} ]] || dns='1.1.1.1 1.0.0.1'
+    fi
+    dns=$(awk '{$1=$1; print}' <<< "$dns")
+    validate_dns_servers "$dns"
+
+    local boot_cidr boot_gateway
+    boot_cidr=$(ip -4 -o address show dev "$boot_interface" scope global 2>/dev/null |
+        awk 'NR == 1 { print $4 }')
+    boot_gateway=$(ip -4 route show default dev "$boot_interface" 2>/dev/null | awk '
+        { for (i = 1; i <= NF; i++) if ($i == "via") { print $(i + 1); exit } }
+    ')
+    if [[ -n $requested_ip ]]; then
+        if [[ $requested_ip == */* ]]; then
+            local requested_address=${requested_ip%/*} requested_prefix=${requested_ip#*/}
+            is_ipv4 "$requested_address" || die "Invalid static IPv4 address: $requested_address"
+            if ! [[ $requested_prefix =~ ^[0-9]+$ ]] || ! (( 10#$requested_prefix <= 32 )); then
+                die "Invalid IPv4 prefix: $requested_prefix"
+            fi
+            boot_cidr=$requested_ip
+        else
+            is_ipv4 "$requested_ip" || die "Invalid static IPv4 address: $requested_ip"
+            [[ -n $requested_netmask ]] || die '--ip without CIDR requires --netmask'
+            boot_cidr="$requested_ip/$(netmask_to_prefix "$requested_netmask")"
+        fi
+    elif [[ -n $requested_netmask ]]; then
+        die '--netmask requires --ip'
+    fi
+    if [[ -n $requested_gateway ]]; then
+        is_ipv4 "$requested_gateway" || die "Invalid IPv4 gateway: $requested_gateway"
+        boot_gateway=$requested_gateway
+    fi
+    [[ $boot_cidr == */* && -n $boot_gateway ]] ||
+        warn 'A complete static IPv4 configuration was not found; Alpine will use DHCP'
     local boot_network
-    boot_network=$(build_boot_network_parameter "$boot_interface" "$hostname" "$dns" "$bootif")
+    boot_network=$(build_boot_network_parameter "$boot_interface" 'alpine' "$dns" "$bootif" \
+        "$boot_cidr" "$boot_gateway")
 
     local payload_sha
     payload_sha=$(sha256sum "${BASH_SOURCE[0]}" | awk '{print $1}')
 
-    local kernel_url initramfs_url airootfs_url airootfs_sig_url core_url
-    kernel_url="$iso_mirror/arch/boot/x86_64/vmlinuz-linux"
-    initramfs_url="$iso_mirror/arch/boot/x86_64/initramfs-linux.img"
-    airootfs_url="$iso_mirror/arch/x86_64/airootfs.sfs"
-    airootfs_sig_url="$airootfs_url.cms.sig"
+    local netboot_url kernel_url initramfs_url modloop_url apk_main_url apk_community_url core_url
+    netboot_url="$alpine_mirror/latest-stable/releases/x86_64/netboot"
+    kernel_url="$netboot_url/vmlinuz-virt"
+    initramfs_url="$netboot_url/initramfs-virt"
+    modloop_url="$netboot_url/modloop-virt"
+    apk_main_url="$alpine_mirror/latest-stable/main/x86_64/APKINDEX.tar.gz"
+    apk_community_url="$alpine_mirror/latest-stable/community/x86_64/APKINDEX.tar.gz"
     core_url=${package_mirror//\$repo/core}
     core_url=${core_url//\$arch/x86_64}
     core_url="$core_url/core.db"
 
-    probe_url 'ArchISO kernel' "$kernel_url"
-    probe_url 'ArchISO initramfs' "$initramfs_url"
-    probe_url 'ArchISO root image' "$airootfs_url"
-    probe_url 'ArchISO CMS signature' "$airootfs_sig_url"
+    probe_url 'Alpine virt kernel' "$kernel_url"
+    probe_url 'Alpine virt initramfs' "$initramfs_url"
+    probe_url 'Alpine virt modloop' "$modloop_url"
+    probe_url 'Alpine main APKINDEX' "$apk_main_url"
+    probe_url 'Alpine community APKINDEX' "$apk_community_url"
     probe_url 'pacman core repository' "$core_url"
 
     cat <<EOF
@@ -601,15 +792,23 @@ stage_main() {
   target disk:       $disk (WILL BE ERASED AFTER REBOOT)
   boot mode:         $boot_mode
   hostname:          $hostname
+  installer hostname: alpine
   timezone:          $timezone
-  ISO mirror:        $iso_mirror
+  NTP:               $ntp
+  Alpine mirror:     $alpine_mirror
   package mirror:    $package_mirror
   boot interface:    $boot_interface (${bootif#01-})
   boot network:      $boot_network
+  DNS servers:       $dns
   payload SHA-256:   $payload_sha
-  root SSH key:      $(printf '%s' "$authorized_key" | awk '{print $1, $NF}')
+  root SSH key:      $(printf '%s' "$authorized_key" | awk '{if (NF >= 3) print $1, $3; else print $1, "(no comment)"}')
+  SSH port:          $ssh_port
   kernel package:    $kernel
+  firmware bundle:   $firmware
+  TCP BBR:           $bbr
+  eth0 naming:       $ethx
   swap:              ${swap_mib} MiB
+  GRUB timeout:      ${grub_timeout}s
   extra packages:    ${extra_packages:-none}
   hold before wipe:  $hold
   stage directory:   $install_dir
@@ -623,14 +822,16 @@ EOF
     need_cmd find
     need_cmd gzip
     mkdir -p -- "$install_dir"
-    download_file "$kernel_url" "$install_dir/vmlinuz-linux" 8000000
-    download_file "$initramfs_url" "$install_dir/initramfs-linux.img.official" 30000000
-    build_archiso_overlay "$install_dir/initramfs-linux.img.official" \
-        "$install_dir/initramfs-linux.img" "$authorized_key"
-    rm -f -- "$install_dir/initramfs-linux.img.official"
+    need_cmd tar
+    download_file "$kernel_url" "$install_dir/vmlinuz-virt" 5000000
+    download_file "$initramfs_url" "$install_dir/initramfs-virt.official" 3000000
+    build_alpine_initramfs "$install_dir/initramfs-virt.official" \
+        "$install_dir/initramfs-virt" "$authorized_key" 'alpine' "$ssh_port" "$dns" \
+        "$alpine_mirror"
+    rm -f -- "$install_dir/initramfs-virt.official"
 
     local disk_b64 hostname_b64 timezone_b64 dns_b64 key_b64 package_mirror_b64
-    local extra_packages_b64 kernel_b64
+    local extra_packages_b64 kernel_b64 ntp_b64
     disk_b64=$(encode_b64 "$disk")
     hostname_b64=$(encode_b64 "$hostname")
     timezone_b64=$(encode_b64 "$timezone")
@@ -639,18 +840,13 @@ EOF
     package_mirror_b64=$(encode_b64 "$package_mirror")
     extra_packages_b64=$(encode_b64 "$extra_packages")
     kernel_b64=$(encode_b64 "$kernel")
+    ntp_b64=$(encode_b64 "$ntp")
 
-    local boot_cidr boot_gateway boot_mac dns_csv
-    boot_cidr=$(ip -4 -o address show dev "$boot_interface" scope global 2>/dev/null |
-        awk 'NR == 1 { print $4 }')
-    boot_gateway=$(ip -4 route show default dev "$boot_interface" 2>/dev/null | awk '
-        { for (i = 1; i <= NF; i++) if ($i == "via") { print $(i + 1); exit } }
-    ')
+    local boot_mac dns_csv
     boot_mac=${bootif#01-}
     boot_mac=${boot_mac//-/:}
     boot_mac=${boot_mac,,}
     dns_csv=${dns// /,}
-    [[ $dns_csv =~ ^[0-9.,]*$ ]] || die 'DNS must contain only IPv4 addresses'
     if [[ $boot_cidr != */* || -z $boot_gateway ]]; then
         boot_cidr=''
         boot_gateway=''
@@ -663,8 +859,8 @@ EOF
         grub_prefix='/boot'
     fi
     grub_stage_dir=${install_dir#/boot}
-    grub_kernel="$grub_prefix$grub_stage_dir/vmlinuz-linux"
-    grub_initramfs="$grub_prefix$grub_stage_dir/initramfs-linux.img"
+    grub_kernel="$grub_prefix$grub_stage_dir/vmlinuz-virt"
+    grub_initramfs="$grub_prefix$grub_stage_dir/initramfs-virt"
     hold_flag=0; [[ $hold == true ]] && hold_flag=1
     power_flag=0; [[ $power_off == true ]] && power_flag=1
 
@@ -677,11 +873,20 @@ boot_mode=$boot_mode
 boot_interface=$boot_interface
 bootif=$bootif
 boot_network=$boot_network
-iso_mirror=$iso_mirror
+alpine_mirror=$alpine_mirror
 package_mirror=$package_mirror
+hostname=$hostname
+timezone=$timezone
+ntp=$ntp
+ssh_port=$ssh_port
+kernel=$kernel
+firmware=$firmware
+bbr=$bbr
+ethx=$ethx
+grub_timeout=$grub_timeout
 payload_sha256=$payload_sha
-kernel_sha256=$(sha256sum "$install_dir/vmlinuz-linux" | awk '{print $1}')
-initramfs_sha256=$(sha256sum "$install_dir/initramfs-linux.img" | awk '{print $1}')
+kernel_sha256=$(sha256sum "$install_dir/vmlinuz-virt" | awk '{print $1}')
+initramfs_sha256=$(sha256sum "$install_dir/initramfs-virt" | awk '{print $1}')
 EOF
 
     cat > "$GRUB_ENTRY_FILE" <<EOF
@@ -692,17 +897,17 @@ menuentry 'Arch Linux network reinstall (ERASES TARGET DISK)' --id archi {
     insmod part_gpt
     insmod part_msdos
     insmod ext2
-    linux $grub_kernel archisobasedir=arch archiso_http_srv=$iso_mirror/ $boot_network cms_verify=y archi_mode=install archi_payload_sha256=$payload_sha archi_disk_b64=$disk_b64 archi_hostname_b64=$hostname_b64 archi_timezone_b64=$timezone_b64 archi_dns_b64=$dns_b64 archi_key_b64=$key_b64 archi_package_mirror_b64=$package_mirror_b64 archi_extra_packages_b64=$extra_packages_b64 archi_kernel_b64=$kernel_b64 archi_boot_mode=$boot_mode archi_swap_mib=$swap_mib archi_hold=$hold_flag archi_poweroff=$power_flag archi_boot_cidr=$boot_cidr archi_gateway=$boot_gateway archi_boot_mac=$boot_mac archi_dns_csv=$dns_csv
+    linux $grub_kernel modules=loop,squashfs,sd_mod,usb_storage,virtio_scsi,virtio_blk alpine_repo=$alpine_mirror/latest-stable/main,$alpine_mirror/latest-stable/community apkovl=/archi.apkovl.tar.gz init=/root/archi-init $boot_network archi_mode=install archi_payload_sha256=$payload_sha archi_disk_b64=$disk_b64 archi_hostname_b64=$hostname_b64 archi_timezone_b64=$timezone_b64 archi_dns_b64=$dns_b64 archi_key_b64=$key_b64 archi_package_mirror_b64=$package_mirror_b64 archi_extra_packages_b64=$extra_packages_b64 archi_kernel_b64=$kernel_b64 archi_ntp_b64=$ntp_b64 archi_boot_mode=$boot_mode archi_swap_mib=$swap_mib archi_hold=$hold_flag archi_poweroff=$power_flag archi_boot_cidr=$boot_cidr archi_gateway=$boot_gateway archi_boot_mac=$boot_mac archi_dns_csv=$dns_csv archi_ssh_port=$ssh_port archi_bbr=$bbr archi_firmware=$firmware archi_ethx=$ethx archi_grub_timeout=$grub_timeout
     initrd $grub_initramfs
 }
 EOF
     chmod 0755 "$GRUB_ENTRY_FILE"
 
     mkdir -p -- "$(dirname "$GRUB_DEFAULT_FILE")"
-    cat > "$GRUB_DEFAULT_FILE" <<'EOF'
+cat > "$GRUB_DEFAULT_FILE" <<EOF
 # Temporary default used by archi.sh. Remove with: archi.sh --cleanup
 GRUB_DEFAULT=archi
-GRUB_TIMEOUT=5
+GRUB_TIMEOUT=$grub_timeout
 GRUB_TIMEOUT_STYLE=menu
 EOF
 
@@ -717,7 +922,7 @@ EOF
     log "It remains reversible until reboot: ${BASH_SOURCE[0]} --cleanup --install-dir $install_dir"
     if [[ $reboot_now == true ]]; then
         [[ $assume_yes == true ]] || die '--reboot requires --yes because the next boot erases the target disk'
-        log 'Rebooting into ArchISO; the selected disk will be erased'
+        log 'Rebooting into Alpine; the selected disk will be erased'
         systemctl reboot
     else
         log 'Run reboot when ready. The next boot will start the Arch installer.'
@@ -732,8 +937,8 @@ partition_path() {
 installer_failure() {
     local rc=$?
     trap - ERR
-    warn "Installation failed with exit code $rc. ArchISO is being left online for diagnosis."
-    systemctl start sshd.service >/dev/null 2>&1 || true
+    warn "Installation failed with exit code $rc. Alpine is being left online for diagnosis."
+    /usr/sbin/sshd >/dev/null 2>&1 || true
     sync
     exit "$rc"
 }
@@ -743,7 +948,7 @@ installer_main() {
     exec > >(tee -a "$log_file") 2>&1
     trap installer_failure ERR
 
-    log "ArchISO installer mode, archi.sh $ARCHI_VERSION"
+    log "Alpine installer mode, archi.sh $ARCHI_VERSION"
     [[ $ARCHI_PAYLOAD_ID == archi-network-reinstall-v1 ]] || die 'Internal payload marker mismatch'
     need_cmd arch-chroot
     need_cmd base64
@@ -761,8 +966,9 @@ installer_main() {
     [[ $expected_sha =~ ^[0-9a-f]{64}$ && $actual_sha == "$expected_sha" ]] ||
         die "Installer payload checksum mismatch (expected $expected_sha, got $actual_sha)"
 
-    local disk hostname timezone dns authorized_key package_mirror extra_packages kernel
+    local disk hostname timezone dns authorized_key package_mirror extra_packages kernel ntp
     local boot_mode swap_mib hold power_off boot_cidr boot_gateway boot_mac
+    local ssh_port bbr firmware ethx grub_timeout
     disk=$(decode_b64 "$(cmdline_value archi_disk_b64)")
     hostname=$(decode_b64 "$(cmdline_value archi_hostname_b64)")
     timezone=$(decode_b64 "$(cmdline_value archi_timezone_b64)")
@@ -771,6 +977,7 @@ installer_main() {
     package_mirror=$(decode_b64 "$(cmdline_value archi_package_mirror_b64)")
     extra_packages=$(decode_b64 "$(cmdline_value archi_extra_packages_b64)")
     kernel=$(decode_b64 "$(cmdline_value archi_kernel_b64)")
+    ntp=$(decode_b64 "$(cmdline_value archi_ntp_b64)")
     boot_mode=$(cmdline_value archi_boot_mode)
     swap_mib=$(cmdline_value archi_swap_mib)
     hold=$(cmdline_value archi_hold)
@@ -778,6 +985,11 @@ installer_main() {
     boot_cidr=$(cmdline_value archi_boot_cidr || true)
     boot_gateway=$(cmdline_value archi_gateway || true)
     boot_mac=$(cmdline_value archi_boot_mac || true)
+    ssh_port=$(cmdline_value archi_ssh_port)
+    bbr=$(cmdline_value archi_bbr)
+    firmware=$(cmdline_value archi_firmware)
+    ethx=$(cmdline_value archi_ethx)
+    grub_timeout=$(cmdline_value archi_grub_timeout)
 
     validate_hostname "$hostname"
     validate_packages "$extra_packages"
@@ -786,22 +998,39 @@ installer_main() {
     [[ $boot_mode == bios || $boot_mode == efi ]] || die "Invalid boot mode: $boot_mode"
     [[ $swap_mib =~ ^[0-9]+$ ]] || die 'Invalid swap size'
     [[ $kernel == linux || $kernel == linux-lts ]] || die 'Invalid kernel package'
+    validate_port "$ssh_port"
+    [[ $bbr == true || $bbr == false ]] || die 'Invalid BBR setting'
+    [[ $firmware == true || $firmware == false ]] || die 'Invalid firmware setting'
+    [[ $ethx == true || $ethx == false ]] || die 'Invalid ethx setting'
+    [[ $grub_timeout =~ ^[0-9]+$ && $grub_timeout -le 60 ]] || die 'Invalid GRUB timeout'
+    [[ $ntp =~ ^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?$ ]] || die 'Invalid NTP host'
     [[ -e /usr/share/zoneinfo/$timezone ]] || die "Unknown timezone: $timezone"
     validate_url 'package mirror' "$package_mirror"
+
+    # Staging uses umask 077, but the installed operating system must inherit
+    # normal Arch directory modes. Sensitive SSH keys and logs are chmod'd
+    # explicitly below.
+    umask 022
+
+    printf '%s\n' 'alpine' > /etc/hostname
+    chmod 0644 /etc/hostname
+    hostname alpine
 
     install -d -m 0700 /root/.ssh
     printf '%s\n' "$authorized_key" > /root/.ssh/authorized_keys
     chmod 0600 /root/.ssh/authorized_keys
     install -d -m 0755 /etc/ssh/sshd_config.d
-    cat > /etc/ssh/sshd_config.d/60-archi-key-only.conf <<'EOF'
+    cat > /etc/ssh/sshd_config.d/60-archi-key-only.conf <<EOF
+Port $ssh_port
 PermitRootLogin prohibit-password
 PasswordAuthentication no
 KbdInteractiveAuthentication no
 EOF
-    systemctl restart sshd.service
+    chmod 0644 /etc/ssh/sshd_config.d/60-archi-key-only.conf
     cp -f -- "${BASH_SOURCE[0]}" /root/archi-installer.sh
     chmod 0700 /root/archi-installer.sh
 
+    install -d -m 0755 /etc/pacman.d
     printf 'Server = %s\n' "$package_mirror" > /etc/pacman.d/mirrorlist
     local core_url
     core_url=${package_mirror//\$repo/core}
@@ -809,12 +1038,16 @@ EOF
     probe_url 'pacman core repository' "$core_url/core.db"
 
     cat <<EOF
-[archi] Verified install plan inside ArchISO
+[archi] Verified install plan inside Alpine
   disk:             $disk (size $(numfmt --to=iec "$(blockdev --getsize64 "$disk")"))
   boot mode:        $boot_mode
   hostname:         $hostname
   package mirror:   $package_mirror
   root SSH:         key only
+  SSH port:         $ssh_port
+  NTP:              $ntp
+  firmware bundle:  $firmware
+  TCP BBR:          $bbr
   swap:             ${swap_mib} MiB
 EOF
 
@@ -848,10 +1081,12 @@ EOF
             --new=2:0:0 --typecode=2:8304 --change-name=2:ROOT "$disk"
     fi
     partprobe "$disk"
-    udevadm settle
+    mdev -s
+    sleep 2
     [[ -b $root_partition ]] || die "Root partition did not appear: $root_partition"
 
     mkfs.ext4 -F -L ArchRoot "$root_partition"
+    install -d /mnt
     mount "$root_partition" /mnt
     if [[ $boot_mode == efi ]]; then
         [[ -b $boot_partition ]] || die "EFI partition did not appear: $boot_partition"
@@ -861,7 +1096,8 @@ EOF
     fi
 
     local -a packages
-    packages=(base "$kernel" linux-firmware grub openssh sudo)
+    packages=(base "$kernel" grub openssh sudo qemu-guest-agent)
+    [[ $firmware == true ]] && packages+=(linux-firmware)
     if [[ $boot_mode == efi ]]; then packages+=(efibootmgr); fi
     case $(awk -F: '/vendor_id/ {gsub(/[[:space:]]/, "", $2); print $2; exit}' /proc/cpuinfo) in
         GenuineIntel) packages+=(intel-ucode) ;;
@@ -871,10 +1107,12 @@ EOF
     for package in $extra_packages; do packages+=("$package"); done
 
     log "Installing packages: ${packages[*]}"
-    pacstrap -K /mnt "${packages[@]}"
+    pacstrap -K -c /mnt "${packages[@]}"
     chmod 0755 /mnt/etc
     genfstab -U /mnt > /mnt/etc/fstab
     chmod 0644 /mnt/etc/fstab
+    cp -Lf /etc/resolv.conf /mnt/etc/resolv.conf
+    chmod 0644 /mnt/etc/resolv.conf
 
     if (( swap_mib > 0 )); then
         fallocate -l "${swap_mib}M" /mnt/swapfile
@@ -895,6 +1133,23 @@ EOF
 127.0.1.1 $hostname
 EOF
     chmod 0644 /mnt/etc/locale.conf /mnt/etc/hostname /mnt/etc/hosts
+
+    install -d -m 0755 /mnt/etc/systemd/timesyncd.conf.d
+    cat > /mnt/etc/systemd/timesyncd.conf.d/60-archi-cloud.conf <<EOF
+[Time]
+NTP=$ntp
+FallbackNTP=time.cloudflare.com time.google.com
+EOF
+    chmod 0644 /mnt/etc/systemd/timesyncd.conf.d/60-archi-cloud.conf
+
+    if [[ $bbr == true ]]; then
+        install -d -m 0755 /mnt/etc/sysctl.d
+        cat > /mnt/etc/sysctl.d/60-archi-cloud.conf <<'EOF'
+net.core.default_qdisc=fq
+net.ipv4.tcp_congestion_control=bbr
+EOF
+        chmod 0644 /mnt/etc/sysctl.d/60-archi-cloud.conf
+    fi
 
     install -d -m 0755 /mnt/etc/systemd/network
     if [[ -n $boot_cidr && -n $boot_gateway && -n $boot_mac ]]; then
@@ -920,14 +1175,15 @@ ${dns:+DNS=$dns}
 EOF
     fi
     chmod 0644 /mnt/etc/systemd/network/20-wired.network
-    ln -sf /run/systemd/resolve/stub-resolv.conf /mnt/etc/resolv.conf
-    systemctl --root=/mnt enable systemd-networkd.service systemd-resolved.service sshd.service
+    arch-chroot /mnt systemctl enable systemd-networkd.service systemd-resolved.service \
+        systemd-timesyncd.service sshd.service
 
     install -d -m 0700 /mnt/root/.ssh
     printf '%s\n' "$authorized_key" > /mnt/root/.ssh/authorized_keys
     chmod 0600 /mnt/root/.ssh/authorized_keys
     install -d -m 0755 /mnt/etc/ssh/sshd_config.d
-    cat > /mnt/etc/ssh/sshd_config.d/60-key-only.conf <<'EOF'
+    cat > /mnt/etc/ssh/sshd_config.d/60-key-only.conf <<EOF
+Port $ssh_port
 PermitRootLogin prohibit-password
 PasswordAuthentication no
 KbdInteractiveAuthentication no
@@ -941,26 +1197,39 @@ EOF
     else
         arch-chroot /mnt grub-install --target=i386-pc --recheck "$disk"
     fi
+    sed -i -E \
+        -e "s/^GRUB_TIMEOUT=.*/GRUB_TIMEOUT=$grub_timeout/" \
+        -e 's/^GRUB_TIMEOUT_STYLE=.*/GRUB_TIMEOUT_STYLE=menu/' \
+        /mnt/etc/default/grub
+    if [[ $ethx == true ]]; then
+        install -d -m 0755 /mnt/etc/udev/rules.d
+        ln -sfn /dev/null /mnt/etc/udev/rules.d/80-net-setup-link.rules
+    fi
     arch-chroot /mnt grub-mkconfig -o /boot/grub/grub.cfg
     arch-chroot /mnt mkinitcpio -P
 
     if [[ -x /mnt/usr/bin/qemu-ga ]]; then
-        systemctl --root=/mnt enable qemu-guest-agent.service
+        arch-chroot /mnt systemctl enable qemu-guest-agent.service
     fi
+    ln -sfn /run/systemd/resolve/stub-resolv.conf /mnt/etc/resolv.conf
 
     cp -f -- "$log_file" /mnt/root/archi-install.log
     cp -f -- "${BASH_SOURCE[0]}" /mnt/root/archi.sh
     chmod 0600 /mnt/root/archi-install.log
     chmod 0700 /mnt/root/archi.sh
+    killall gpg-agent 2>/dev/null || true
     sync
-    umount -R /mnt
+    if grep -qsE '[[:space:]]/mnt/boot[[:space:]]' /proc/mounts; then
+        umount /mnt/boot
+    fi
+    umount /mnt
     log 'Arch Linux installation completed successfully'
 
     trap - ERR
     if [[ $power_off == 1 ]]; then
-        systemctl poweroff
+        poweroff -f
     else
-        systemctl reboot
+        reboot -f
     fi
 }
 

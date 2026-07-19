@@ -1,100 +1,162 @@
 # archi.sh
 
-`archi.sh` 是一个独立实现的 Arch Linux 网络重装脚本。它在现有 Linux 中下载官方 ArchISO kernel/initramfs，并向官方 initramfs 追加一个很小的 cpio overlay，内含当前脚本、SSH 公钥、网络配置和 systemd 安装服务；不使用 Alpine，也不要求重启后再次下载脚本。
+`archi.sh` 是面向云主机的 Arch Linux 整盘网络重装脚本。临时安装环境使用 Alpine `latest-stable` 的官方 `vmlinuz-virt`、`initramfs-virt` 和 `modloop-virt`；启动后只从所选 Alpine 镜像安装官方 APK，最终通过 `pacstrap` 把 Arch 官方仓库包直接安装到目标分区。
 
-设计上只参考了 [`bin456789/reinstall`](https://github.com/bin456789/reinstall) 的一次性启动、网络继承和 hold/rescue 思路；本项目不包装、不调用也不依赖该项目，ArchISO overlay、GRUB staging 与 pacstrap 安装流程均为独立实现。
+脚本不下载 `airootfs.sfs`，不写入预制系统镜像，也不需要自行编译 initrd。除了脚本本体，下载内容都来自配置的 Alpine 或 Arch 镜像。
 
-## 前提
+设计上只参考了 [`bin456789/reinstall`](https://github.com/bin456789/reinstall) 的一次性引导、网络继承和救援环境思路，以及 [`bohanwood/debi`](https://github.com/bohanwood/debi) 的参数组织方式；没有复制、调用或依赖它们的代码，GRUB staging、Alpine apkovl/PID 1 和 Arch 安装流程均为独立实现。
 
-- x86_64 KVM/物理机，使用 GRUB 2。
-- 有线网络具备 IPv4 联网能力；脚本优先继承当前地址、网关和 DNS，探测不到时才回退 DHCP。
-- 脚本会记录当前 IPv4 地址、网关、DNS 和默认路由网卡 MAC，在 ArchISO 与安装后的系统中恢复静态网络；探测不到完整静态参数时回退 DHCP。
-- 建议至少 2 GiB 内存、8 GiB 磁盘。
-- 构建 overlay 需要 `cpio`、`gzip`，以及 `unmkinitramfs`（Debian/Ubuntu 的 `initramfs-tools-core`）或 Arch 的 `lsinitcpio`。
-- 安装会完整清空 `--disk` 指定的磁盘。
+## 默认结果
 
-## 先做 dry-run
+- 临时环境主机名 `alpine`，最终主机名 `arch`。
+- Arch `linux-lts` 内核；默认不安装 `linux-firmware`。
+- 安装并启用 `qemu-guest-agent`。
+- root 密码锁定，仅允许指定公钥登录，SSH 端口 22。
+- 自动继承当前默认网卡的 IPv4、网关、DNS 和 MAC；信息不完整时回退 DHCP。
+- 最终网络使用 `systemd-networkd`、`systemd-resolved` 和 `systemd-timesyncd`。
+- 默认采用 eth0 风格命名，按官方方式创建 `/etc/udev/rules.d/80-net-setup-link.rules -> /dev/null`。
+- GPT + ext4 + GRUB；默认不创建 swap。
+
+## 支持范围
+
+- x86_64，GRUB 2，有线 IPv4 网络。
+- BIOS 或 UEFI，单块整盘安装，ext4 根分区。
+- 至少 8 GiB 磁盘；建议临时环境至少 512 MiB 内存。
+- staging 主机需提供 Bash、curl、cpio、gzip、GRUB 工具和常见磁盘/网络命令。
+
+安装会清空 `--disk` 指定的整块磁盘。建议先运行 `--dry-run`，并确认控制台或 SSH 公钥可用。
+
+## 快速使用
+
+先检查计划，不修改启动配置：
 
 ```bash
 chmod +x archi.sh
-
 ./archi.sh \
   --dry-run \
   --authorized-key-file /root/.ssh/authorized_keys \
   --disk /dev/vda
 ```
 
-`--dry-run` 会检查 ArchISO kernel/initramfs、`airootfs.sfs`、CMS 签名和 pacman `core.db`，但不会下载启动文件或修改 GRUB。正式 staging 下载 initramfs 后，还会检查当前 ArchISO 的 `archiso_pxe_common` 接口，接口不兼容时停止而不是写入启动项。
-
-## 中国大陆或受限出口示例
-
-镜像地址只是示例，执行前必须以 `--dry-run` 的探测结果为准：
-
-```bash
-./archi.sh \
-  --iso-mirror 'https://mirrors.tuna.tsinghua.edu.cn/archlinux/iso/latest' \
-  --package-mirror 'https://mirrors.tuna.tsinghua.edu.cn/archlinux/$repo/os/$arch' \
-  --authorized-key-file /root/.ssh/authorized_keys \
-  --disk /dev/vda \
-  --hostname arch-gz \
-  --timezone Asia/Shanghai \
-  --dns '119.29.29.29 223.5.5.5' \
-  --extra-packages 'qemu-guest-agent curl nftables' \
-  --dry-run
-```
-
-## 安全地进入安装环境
-
-加 `--hold` 后，首次重启只会进入 ArchISO、写入 root SSH 公钥并启动 sshd，不会擦盘：
+准备下一次启动，但暂不自动重启：
 
 ```bash
 ./archi.sh \
   --authorized-key-file /root/.ssh/authorized_keys \
-  --disk /dev/vda \
-  --hold
+  --disk /dev/vda
 
 reboot
 ```
 
-SSH 进入 ArchISO 后确认磁盘和网络，再执行：
+确认擦盘并直接 staging、重启、安装：
+
+```bash
+./archi.sh \
+  --authorized-key-file /root/.ssh/authorized_keys \
+  --disk /dev/vda \
+  --reboot --yes
+```
+
+## 受限出口与中国大陆镜像
+
+预设会同时切换 Alpine、Arch、DNS 和 NTP：
+
+```bash
+./archi.sh \
+  --tuna \
+  --authorized-key-file /root/.ssh/authorized_keys \
+  --disk /dev/vda \
+  --timezone Asia/Shanghai \
+  --reboot --yes
+```
+
+可选预设：
+
+- `--tuna`：清华 TUNA。
+- `--ustc` 或 `--china`：中科大 USTC。
+- `--aliyun`：阿里云。
+- `--cloudflare`：官方镜像配 Cloudflare DNS/NTP。
+
+也可分别使用 `--alpine-mirror URL` 和 `--package-mirror URL`。前者应是包含 `latest-stable` 的 Alpine 镜像根地址，后者应包含 Arch 的 `$repo/os/$arch`。
+
+## 安装期间 SSH 查看进度
+
+Alpine 启动后会立即恢复网络、生成临时主机密钥并启动 key-only SSH，主机名为 `alpine`。使用 staging 时提供的 root 公钥登录：
+
+```bash
+ssh root@SERVER_IP
+tail -f /tmp/archi-install.log
+```
+
+若使用 `--hold`，Alpine 只验证计划并保持在线，不擦盘：
+
+```bash
+./archi.sh \
+  --hold \
+  --authorized-key-file /root/.ssh/authorized_keys \
+  --disk /dev/vda
+reboot
+```
+
+检查无误后在 Alpine 中继续：
 
 ```bash
 ARCHI_FORCE_INSTALL=1 /root/archi.sh
 ```
 
-## 直接自动安装
+失败时 Alpine 不会自动重启，可继续通过 SSH 查看日志和诊断。成功日志会复制到最终系统的 `/root/archi-install.log`。
 
-```bash
-./archi.sh \
-  --authorized-key-file /root/.ssh/authorized_keys \
-  --disk /dev/vda \
-  --hostname archlinux \
-  --timezone Asia/Shanghai \
-  --extra-packages 'qemu-guest-agent curl nftables' \
-  --reboot --yes
-```
+## debi 风格常用选项
 
-安装结果默认使用：
+| 选项 | 行为 |
+|---|---|
+| `--hostname NAME` | 最终主机名；默认 `arch` |
+| `--timezone ZONE` | 最终时区；默认 `UTC` |
+| `--ip CIDR` / `--netmask` / `--gateway` / `--interface` | 覆盖自动探测的静态网络 |
+| `--dns "ADDR ..."` / `--ntp HOST` | 覆盖 DNS 和 NTP |
+| `--authorized-keys-url URL` | staging 时下载并嵌入 root 公钥 |
+| `--ssh-port PORT` | 同时设置 Alpine 和最终 Arch 的 SSH 端口 |
+| `--cloud-kernel` | 恢复默认云配置：`linux-lts` 且不装 firmware |
+| `--kernel linux` | 改用 Arch 滚动主线内核 |
+| `--firmware` | 安装 `linux-firmware` |
+| `--install "PKG ..."` | 安装额外 Arch 官方仓库包 |
+| `--bbr` | 启用 fq + TCP BBR |
+| `--ethx` | eth0 风格命名，默认开启 |
+| `--predictable-names` | 保留 systemd 可预测网卡名 |
+| `--swap-mib N` | 显式创建 N MiB swap；默认 0 |
+| `--bios` / `--efi` | 覆盖自动检测的启动模式 |
+| `--power-off` | 安装成功后关机而非重启 |
 
-- GPT + ext4；BIOS 创建 `bios_grub` 分区，UEFI 创建 512 MiB ESP。
-- 默认安装 Arch 官方 `linux-lts` 内核；可用 `--kernel linux` 改为滚动主线内核。
-- `systemd-networkd` + `systemd-resolved`；优先保留 staging 时的静态 IPv4，无法探测时使用 DHCP。
-- GRUB、OpenSSH。
-- root 只允许指定公钥登录，密码处于锁定状态。
-- 默认创建 1024 MiB swap 文件，可用 `--swap-mib 0` 关闭。
+完整列表请运行 `./archi.sh --help`。
 
-## 重启前撤销
+## 网络与 DNS 探测
 
-在尚未重启进入 ArchISO 时，可以撤销启动项：
+脚本以 `ip route get` 和实时地址/路由为准，并从以下常见网络配置器或运行态文件收集 IPv4 DNS：
+
+- systemd-resolved (`resolvectl`)
+- NetworkManager (`nmcli` 及 `/run/NetworkManager/*`)
+- resolvconf
+- ConnMan
+- `/etc/resolv.conf`
+
+DNS 会去重并排除 loopback stub 地址。完整的 IPv4、网关和 MAC 被写进 Alpine 启动参数，并在最终 Arch 中按 MAC 恢复；无法形成完整静态配置时使用 DHCP。
+
+## 启动文件与来源
+
+staging 只下载约 12 MiB 的 Alpine virt kernel 和约 9 MiB 的 initramfs。Alpine 启动后再从同一 `latest-stable` 镜像获取约 22 MiB 的 modloop 和所需官方 APK；最终系统包只从所选 Arch 镜像获取。
+
+构建的 overlay 内仅包含配置、SSH 公钥和当前脚本。payload SHA-256 被写入内核参数，Alpine 执行前会校验脚本完整性。
+
+## 撤销 staging
+
+尚未重启进入 Alpine 时可以撤销 GRUB 项和下载文件：
 
 ```bash
 ./archi.sh --cleanup
 ```
 
-如果安装失败，脚本不会自动重启；ArchISO 会保留在线并启动 key-only SSH，日志位于 `/tmp/archi-install.log`。安装成功后的日志复制到 `/root/archi-install.log`。
-
 ## 已知边界
 
-- 当前仅支持 x86_64、GRUB 2、单磁盘整盘安装和 ext4。
-- staging 主机当前需要能提取 initramfs；正式安装期间仍需访问 ArchISO root image 与 pacman 镜像。
-- 这不是 Arch 官方项目；滚动发行版介质变化后应重新执行 dry-run 和虚拟机测试。
+- 当前不支持多磁盘布局、LVM、RAID、加密根分区或无线网络。
+- `--extra-packages` 只适用于所选 Arch 官方仓库中存在的包。
+- 这是独立项目，不是 Alpine 或 Arch 官方安装器；滚动仓库或 netboot 介质变化后应重新执行 dry-run 和虚拟机测试。
