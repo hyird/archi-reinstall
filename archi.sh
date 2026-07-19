@@ -12,7 +12,7 @@ shopt -s inherit_errexit 2>/dev/null || true
 umask 077
 
 readonly ARCHI_PAYLOAD_ID='archi-network-reinstall-v1'
-readonly ARCHI_VERSION='0.2.0'
+readonly ARCHI_VERSION='0.2.1'
 readonly DEFAULT_ISO_MIRROR='https://geo.mirror.pkgbuild.com/iso/latest'
 # The pacman placeholders must remain literal until the installer writes mirrorlist.
 # shellcheck disable=SC2016
@@ -204,7 +204,7 @@ detect_dns_servers() {
 }
 
 build_boot_network_parameter() {
-    local interface=$1 hostname=$2 dns=$3 cidr address prefix gateway netmask dns0='' dns1=''
+    local interface=$1 dns=$2 cidr address prefix gateway netmask dns0=''
     cidr=$(ip -4 -o address show dev "$interface" scope global 2>/dev/null |
         awk 'NR == 1 { print $4 }')
     gateway=$(ip -4 route show default dev "$interface" 2>/dev/null | awk '
@@ -214,9 +214,11 @@ build_boot_network_parameter() {
         address=${cidr%/*}
         prefix=${cidr#*/}
         netmask=$(prefix_to_netmask "$prefix")
-        read -r dns0 dns1 _ <<< "$dns"
-        printf 'ip=%s::%s:%s:%s::none:%s:%s\n' \
-            "$address" "$gateway" "$netmask" "$hostname" "$dns0" "$dns1"
+        read -r dns0 _ <<< "$dns"
+        [[ -n $dns0 ]] || dns0=$gateway
+        # ArchISO uses klibc ipconfig's six-field long form. Its server field
+        # doubles as the DNS server; BOOTIF selects the interface by MAC.
+        printf 'ip=%s:%s:%s:%s::none\n' "$address" "$dns0" "$gateway" "$netmask"
     else
         printf 'ip=dhcp\n'
     fi
@@ -419,7 +421,7 @@ stage_main() {
     bootif=${bootif^^}
     if [[ -z $dns ]]; then dns=$(detect_dns_servers "$boot_interface"); fi
     local boot_network
-    boot_network=$(build_boot_network_parameter "$boot_interface" "$hostname" "$dns")
+    boot_network=$(build_boot_network_parameter "$boot_interface" "$dns")
 
     local payload_tmp payload_sha current_sha
     payload_tmp=$(mktemp)
