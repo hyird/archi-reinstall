@@ -12,7 +12,7 @@ shopt -s inherit_errexit 2>/dev/null || true
 umask 077
 
 readonly ARCHI_PAYLOAD_ID='archi-network-reinstall-v1'
-readonly ARCHI_VERSION='0.2.1'
+readonly ARCHI_VERSION='0.2.2'
 readonly DEFAULT_ISO_MIRROR='https://geo.mirror.pkgbuild.com/iso/latest'
 # The pacman placeholders must remain literal until the installer writes mirrorlist.
 # shellcheck disable=SC2016
@@ -216,9 +216,9 @@ build_boot_network_parameter() {
         netmask=$(prefix_to_netmask "$prefix")
         read -r dns0 _ <<< "$dns"
         [[ -n $dns0 ]] || dns0=$gateway
-        # ArchISO uses klibc ipconfig's six-field long form. Its server field
-        # doubles as the DNS server; BOOTIF selects the interface by MAC.
-        printf 'ip=%s:%s:%s:%s::none\n' "$address" "$dns0" "$gateway" "$netmask"
+        # archiso_pxe_common appends "::<device>" after resolving BOOTIF.
+        # klibc ipconfig also treats its server field as the DNS server.
+        printf 'ip=%s:%s:%s:%s\n' "$address" "$dns0" "$gateway" "$netmask"
     else
         printf 'ip=dhcp\n'
     fi
