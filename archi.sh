@@ -14,6 +14,8 @@ umask 077
 readonly ARCHI_PAYLOAD_ID='archi-network-reinstall-v1'
 readonly ARCHI_VERSION='0.1.1'
 readonly DEFAULT_ISO_MIRROR='https://geo.mirror.pkgbuild.com/iso/latest'
+# The pacman placeholders must remain literal until the installer writes mirrorlist.
+# shellcheck disable=SC2016
 readonly DEFAULT_PACKAGE_MIRROR='https://geo.mirror.pkgbuild.com/$repo/os/$arch'
 readonly DEFAULT_INSTALL_DIR='/boot/archi-reinstall'
 readonly GRUB_ENTRY_FILE='/etc/grub.d/42_archi_reinstall'
