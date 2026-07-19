@@ -12,7 +12,7 @@ shopt -s inherit_errexit 2>/dev/null || true
 umask 077
 
 readonly ARCHI_PAYLOAD_ID='archi-network-reinstall-v1'
-readonly ARCHI_VERSION='0.6.0'
+readonly ARCHI_VERSION='0.6.1'
 readonly DEFAULT_ALPINE_MIRROR='https://dl-cdn.alpinelinux.org/alpine'
 # The pacman placeholders must remain literal until the installer writes mirrorlist.
 readonly DEFAULT_PACKAGE_MIRROR="https://geo.mirror.pkgbuild.com/\$repo/os/\$arch"
@@ -291,7 +291,7 @@ detect_dns_servers() {
             for (i = 1; i <= NF; i++) {
                 value = $i
                 gsub(/[,;]/, "", value)
-                if (value ~ /^[0-9]+(\.[0-9]+){3}$/ && value !~ /^127\./ && !seen[value]++) {
+                if (value ~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/ && value !~ /^127\./ && !seen[value]++) {
                     printf "%s%s", separator, value
                     separator = " "
                 }
