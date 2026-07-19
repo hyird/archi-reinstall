@@ -12,7 +12,7 @@ shopt -s inherit_errexit 2>/dev/null || true
 umask 077
 
 readonly ARCHI_PAYLOAD_ID='archi-network-reinstall-v1'
-readonly ARCHI_VERSION='0.6.2'
+readonly ARCHI_VERSION='0.7.0'
 readonly DEFAULT_ALPINE_MIRROR='https://dl-cdn.alpinelinux.org/alpine'
 # The pacman placeholders must remain literal until the installer writes mirrorlist.
 readonly DEFAULT_PACKAGE_MIRROR="https://geo.mirror.pkgbuild.com/\$repo/os/\$arch"
@@ -423,13 +423,24 @@ ln -sfn /proc/self/fd/1 /dev/stdout
 ln -sfn /proc/self/fd/2 /dev/stderr
 ln -sfn /proc/mounts /etc/mtab
 apk del alpine-base alpine-conf >/tmp/archi-apk-remove.log 2>&1
-apk add --no-cache arch-install-scripts bash ca-certificates curl dosfstools \
-    e2fsprogs findmnt lsblk openssh parted sgdisk tzdata wipefs >/tmp/archi-apk.log 2>&1
-apk_rc=$?
+apk_rc=1
+apk_attempt=1
+while [ "$apk_attempt" -le 3 ]; do
+    if apk add --no-cache arch-install-scripts bash ca-certificates curl dosfstools \
+        e2fsprogs findmnt lsblk openssh parted sgdisk tzdata wipefs \
+        >/tmp/archi-apk.log 2>&1; then
+        apk_rc=0
+        break
+    fi
+    echo "[archi] APK attempt $apk_attempt/3 failed; retrying." >/dev/console
+    apk_attempt=$((apk_attempt + 1))
+    sleep 3
+done
 echo "[archi] required APK exit status: $apk_rc" >/dev/console
 [ "$apk_rc" -eq 0 ] || cat /tmp/archi-apk.log >/dev/console
 mkdir -p /.modloop /lib
-curl --fail --location --retry 5 --output /tmp/modloop-virt \
+curl --fail --location --retry 5 --retry-all-errors --retry-delay 2 \
+    --connect-timeout 10 --output /tmp/modloop-virt \
     "$(cat /etc/archi-modloop-url)" >/tmp/archi-modloop.log 2>&1
 modloop_rc=$?
 if [ "$modloop_rc" -eq 0 ]; then
@@ -769,7 +780,7 @@ stage_main() {
     local payload_sha
     payload_sha=$(sha256sum "${BASH_SOURCE[0]}" | awk '{print $1}')
 
-    local netboot_url kernel_url initramfs_url modloop_url apk_main_url apk_community_url core_url
+    local netboot_url kernel_url initramfs_url modloop_url apk_main_url apk_community_url core_url extra_url
     netboot_url="$alpine_mirror/latest-stable/releases/x86_64/netboot"
     kernel_url="$netboot_url/vmlinuz-virt"
     initramfs_url="$netboot_url/initramfs-virt"
@@ -779,6 +790,9 @@ stage_main() {
     core_url=${package_mirror//\$repo/core}
     core_url=${core_url//\$arch/x86_64}
     core_url="$core_url/core.db"
+    extra_url=${package_mirror//\$repo/extra}
+    extra_url=${extra_url//\$arch/x86_64}
+    extra_url="$extra_url/extra.db"
 
     probe_url 'Alpine virt kernel' "$kernel_url"
     probe_url 'Alpine virt initramfs' "$initramfs_url"
@@ -786,6 +800,7 @@ stage_main() {
     probe_url 'Alpine main APKINDEX' "$apk_main_url"
     probe_url 'Alpine community APKINDEX' "$apk_community_url"
     probe_url 'pacman core repository' "$core_url"
+    probe_url 'pacman extra repository' "$extra_url"
 
     cat <<EOF
 [archi] Installation plan
@@ -955,10 +970,18 @@ installer_main() {
     need_cmd blockdev
     need_cmd curl
     need_cmd genfstab
+    need_cmd killall
     need_cmd lsblk
+    need_cmd mdev
+    need_cmd mkfs.ext4
+    need_cmd mount
+    need_cmd numfmt
     need_cmd pacstrap
+    need_cmd partprobe
+    need_cmd pidof
     need_cmd sgdisk
     need_cmd sha256sum
+    need_cmd wipefs
 
     local expected_sha actual_sha
     expected_sha=$(cmdline_value archi_payload_sha256)
@@ -996,6 +1019,7 @@ installer_main() {
     [[ $disk == /dev/* && -b $disk ]] || die "Target disk is unavailable: $disk"
     [[ $(lsblk -ndo TYPE "$disk") == disk ]] || die "Target is not a whole disk: $disk"
     [[ $boot_mode == bios || $boot_mode == efi ]] || die "Invalid boot mode: $boot_mode"
+    [[ $boot_mode != efi ]] || need_cmd mkfs.fat
     [[ $swap_mib =~ ^[0-9]+$ ]] || die 'Invalid swap size'
     [[ $kernel == linux || $kernel == linux-lts ]] || die 'Invalid kernel package'
     validate_port "$ssh_port"
@@ -1080,9 +1104,14 @@ EOF
         sgdisk --new=1:1MiB:+2MiB --typecode=1:ef02 --change-name=1:BIOSBOOT \
             --new=2:0:0 --typecode=2:8304 --change-name=2:ROOT "$disk"
     fi
-    partprobe "$disk"
-    mdev -s
-    sleep 2
+    for _ in 1 2 3 4 5 6 7 8 9 10; do
+        partprobe "$disk" 2>/dev/null || true
+        mdev -s 2>/dev/null || true
+        if [[ -b $root_partition ]] && { [[ $boot_mode != efi ]] || [[ -b $boot_partition ]]; }; then
+            break
+        fi
+        sleep 1
+    done
     [[ -b $root_partition ]] || die "Root partition did not appear: $root_partition"
 
     mkfs.ext4 -F -L ArchRoot "$root_partition"
@@ -1096,7 +1125,10 @@ EOF
     fi
 
     local -a packages
-    packages=(base "$kernel" grub openssh sudo qemu-guest-agent)
+    packages=(
+        base "$kernel" grub openssh sudo qemu-guest-agent
+        inetutils coreutils bash-completion wget curl vim nano cpio
+    )
     [[ $firmware == true ]] && packages+=(linux-firmware)
     if [[ $boot_mode == efi ]]; then packages+=(efibootmgr); fi
     case $(awk -F: '/vendor_id/ {gsub(/[[:space:]]/, "", $2); print $2; exit}' /proc/cpuinfo) in
@@ -1107,7 +1139,18 @@ EOF
     for package in $extra_packages; do packages+=("$package"); done
 
     log "Installing packages: ${packages[*]}"
-    pacstrap -K -c /mnt "${packages[@]}"
+    local pacstrap_ok=false
+    for _ in 1 2 3; do
+        if pacstrap -K -c /mnt "${packages[@]}"; then
+            pacstrap_ok=true
+            break
+        fi
+        warn 'pacstrap failed; cleaning transient state before retry'
+        killall gpg-agent 2>/dev/null || true
+        rm -f -- /mnt/var/lib/pacman/db.lck
+        sleep 5
+    done
+    [[ $pacstrap_ok == true ]] || die 'pacstrap failed after three attempts'
     chmod 0755 /mnt/etc
     genfstab -U /mnt > /mnt/etc/fstab
     chmod 0644 /mnt/etc/fstab
@@ -1218,19 +1261,34 @@ EOF
     chmod 0600 /mnt/root/archi-install.log
     chmod 0700 /mnt/root/archi.sh
     killall gpg-agent 2>/dev/null || true
-    sync
-    if grep -qsE '[[:space:]]/mnt/boot[[:space:]]' /proc/mounts; then
-        umount /mnt/boot
-    fi
-    local unmounted=false
+    local agents_stopped=false
     for _ in 1 2 3 4 5; do
-        if umount /mnt; then
-            unmounted=true
+        if ! pidof gpg-agent >/dev/null 2>&1; then
+            agents_stopped=true
             break
         fi
         sleep 1
     done
-    [[ $unmounted == true ]] || die 'Target root remained busy after five unmount attempts'
+    if [[ $agents_stopped != true ]]; then
+        warn 'Temporary gpg-agent did not stop after SIGTERM; sending SIGKILL'
+        killall -9 gpg-agent 2>/dev/null || true
+        sleep 1
+    fi
+    pidof gpg-agent >/dev/null 2>&1 && die 'Temporary gpg-agent is still running'
+    sync
+    local target unmounted
+    for target in /mnt/boot /mnt; do
+        grep -qsE "[[:space:]]${target}[[:space:]]" /proc/mounts || continue
+        unmounted=false
+        for _ in 1 2 3 4 5; do
+            if umount "$target"; then
+                unmounted=true
+                break
+            fi
+            sleep 1
+        done
+        [[ $unmounted == true ]] || die "$target remained busy after five unmount attempts"
+    done
     log 'Arch Linux installation completed successfully'
 
     trap - ERR

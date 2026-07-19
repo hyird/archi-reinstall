@@ -11,6 +11,7 @@
 - 临时环境主机名 `alpine`，最终主机名 `arch`。
 - Arch `linux-lts` 内核；默认不安装 `linux-firmware`。
 - 安装并启用 `qemu-guest-agent`。
+- 默认安装 `inetutils`、`coreutils`、`bash-completion`、`wget`、`curl`、`vim` 和 `nano`，并保留脚本再次 staging 所需的 `cpio`。
 - root 密码锁定，仅允许指定公钥登录，SSH 端口 22。
 - 自动继承当前默认网卡的 IPv4、网关、DNS 和 MAC；信息不完整时回退 DHCP。
 - 最终网络使用 `systemd-networkd`、`systemd-resolved` 和 `systemd-timesyncd`。
@@ -146,6 +147,16 @@ DNS 会去重并排除 loopback stub 地址。完整的 IPv4、网关和 MAC 被
 staging 只下载约 12 MiB 的 Alpine virt kernel 和约 9 MiB 的 initramfs。Alpine 启动后再从同一 `latest-stable` 镜像获取约 22 MiB 的 modloop 和所需官方 APK；最终系统包只从所选 Arch 镜像获取。
 
 构建的 overlay 内仅包含配置、SSH 公钥和当前脚本。payload SHA-256 被写入内核参数，Alpine 执行前会校验脚本完整性。
+
+## 容错与失败处理
+
+- staging 会在写入 GRUB 前检查 Alpine kernel、initramfs、modloop、main/community APKINDEX，以及 Arch core/extra 仓库。
+- kernel/initramfs 使用临时文件下载，通过最小体积检查后才原子替换正式文件；curl 会重试连接失败。
+- Alpine 必需 APK 最多尝试 3 次，modloop 下载最多尝试 5 次。
+- 分区完成后最多等待 10 秒让 virtio、SCSI、NVMe 等块设备节点出现。
+- `pacstrap` 遇到临时仓库或连接故障时最多尝试 3 次，并清理失效的数据库锁和临时 GPG agent。
+- 安装完成后先等待临时 GPG agent 确实退出，超时则强制终止；随后对 EFI 和根挂载点分别重试卸载，避免后台进程竞态。
+- 任一步失败都不会盲目重启；Alpine 和 key-only SSH 会保持在线，日志位于 `/tmp/archi-install.log`。
 
 ## 撤销 staging
 
