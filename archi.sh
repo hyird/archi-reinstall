@@ -4,15 +4,15 @@
 # The same file has two modes:
 #   1. On the existing Linux system it stages the official ArchISO kernel and
 #      initramfs in /boot and creates a one-time GRUB entry.
-#   2. ArchISO downloads this file through its official script=<URL> facility;
-#      the script then partitions the selected disk and installs Arch Linux.
+#   2. An appended initramfs overlay copies this exact file into the official
+#      ArchISO userspace and starts it as a systemd service.
 
 set -Eeuo pipefail
 shopt -s inherit_errexit 2>/dev/null || true
 umask 077
 
 readonly ARCHI_PAYLOAD_ID='archi-network-reinstall-v1'
-readonly ARCHI_VERSION='0.3.0'
+readonly ARCHI_VERSION='0.4.0'
 readonly DEFAULT_ISO_MIRROR='https://geo.mirror.pkgbuild.com/iso/latest'
 # The pacman placeholders must remain literal until the installer writes mirrorlist.
 # shellcheck disable=SC2016
@@ -40,10 +40,6 @@ Usage:
   archi.sh [stage options]
   archi.sh --cleanup [--install-dir DIR]
 
-Required for staging:
-  --script-url URL             HTTP(S) URL from which ArchISO downloads this
-                               exact script after reboot.
-
 Stage options:
   --iso-mirror URL             Arch ISO "latest" directory.
   --package-mirror URL         Pacman mirror containing $repo/os/$arch.
@@ -52,14 +48,14 @@ Stage options:
   --hostname NAME              Installed hostname (default: current hostname).
   --timezone ZONE              Installed timezone (default: UTC).
   --dns "ADDR ..."             DNS servers written to systemd-networkd config.
-  --kernel PACKAGE             linux or linux-lts (default: linux).
+  --kernel PACKAGE             linux or linux-lts (default: linux-lts).
   --extra-packages "PKG ..."   Extra official repository packages.
   --swap-mib N                 Swap file size in MiB (default: 1024, 0 disables).
   --boot-mode MODE             auto, bios, or efi (default: auto).
   --install-dir DIR            Staging directory under /boot.
   --hold                       Boot ArchISO, enable key-only SSH, but do not wipe.
                                Continue there with:
-                               ARCHI_FORCE_INSTALL=1 /tmp/startup_script
+                               ARCHI_FORCE_INSTALL=1 /root/archi.sh
   --power-off                  Power off instead of reboot after installation.
   --reboot                     Reboot immediately after staging.
   --yes                        Required together with --reboot.
@@ -70,8 +66,8 @@ Stage options:
   --version                    Show script version.
 
 The target must be x86_64, use GRUB 2, have wired IPv4 connectivity, and have
-enough RAM for the network live image (2 GiB minimum recommended). The current
-IPv4 route is preserved for ArchISO boot, with DHCP as a fallback.
+enough RAM for the network live image (2 GiB minimum recommended). The official
+ArchISO kernel/initramfs is used directly; archi.sh only appends its own overlay.
 EOF
 }
 
@@ -204,8 +200,8 @@ detect_dns_servers() {
 }
 
 build_boot_network_parameter() {
-    local interface=$1 hostname=$2 dns=$3 bootif=$4
-    local cidr address prefix gateway netmask dns0='' dns1=''
+    local interface=$1 dns=$3 bootif=$4
+    local cidr address prefix gateway netmask dns0=''
     cidr=$(ip -4 -o address show dev "$interface" scope global 2>/dev/null |
         awk 'NR == 1 { print $4 }')
     gateway=$(ip -4 route show default dev "$interface" 2>/dev/null | awk '
@@ -215,15 +211,176 @@ build_boot_network_parameter() {
         address=${cidr%/*}
         prefix=${cidr#*/}
         netmask=$(prefix_to_netmask "$prefix")
-        read -r dns0 dns1 _ <<< "$dns"
+        read -r dns0 _ <<< "$dns"
         [[ -n $dns0 ]] || dns0=$gateway
-        # BOOTIF makes archiso_pxe_common append another device field, so a
-        # static configuration with DNS must provide the full form itself.
-        printf 'ip=%s::%s:%s:%s:eth0:none:%s:%s net.ifnames=0\n' \
-            "$address" "$gateway" "$netmask" "$hostname" "$dns0" "$dns1"
+        # The ArchISO hook adds the selected BOOTIF device fields. Its ipconfig
+        # accepts this compact static form; our overlay writes DNS separately.
+        printf 'ip=%s:%s:%s:%s BOOTIF=%s\n' \
+            "$address" "$dns0" "$gateway" "$netmask" "$bootif"
     else
         printf 'ip=dhcp BOOTIF=%s\n' "$bootif"
     fi
+}
+
+extract_archiso_initramfs() {
+    local image=$1 destination=$2
+    mkdir -p -- "$destination"
+    if command -v unmkinitramfs >/dev/null 2>&1; then
+        unmkinitramfs "$image" "$destination"
+    elif command -v lsinitcpio >/dev/null 2>&1; then
+        (cd "$destination" && lsinitcpio -x "$image")
+    else
+        die 'Need unmkinitramfs (Debian/Ubuntu: initramfs-tools-core) or lsinitcpio (Arch: mkinitcpio) to build the Arch overlay'
+    fi
+}
+
+build_archiso_overlay() {
+    local original=$1 destination=$2 authorized_key=$3
+    local work extracted overlay common_hook hook_count latehook_count overlay_archive
+    work=$(mktemp -d)
+    extracted=$work/extracted
+    overlay=$work/overlay
+    overlay_archive=$work/archi-overlay.img
+    mkdir -p -- "$overlay/hooks" "$overlay/archi"
+
+    extract_archiso_initramfs "$original" "$extracted"
+    mapfile -t common_hooks < <(find "$extracted" -type f -path '*/hooks/archiso_pxe_common')
+    [[ ${#common_hooks[@]} -eq 1 ]] ||
+        die "Expected one archiso_pxe_common hook, found ${#common_hooks[@]}"
+    common_hook=${common_hooks[0]}
+    hook_count=$(grep -c '^run_hook() {' "$common_hook" || true)
+    latehook_count=$(grep -c '^run_latehook() {' "$common_hook" || true)
+    [[ $hook_count == 1 && $latehook_count == 1 ]] ||
+        die 'Unsupported ArchISO initramfs: network hook interface changed'
+
+    cp -f -- "$common_hook" "$overlay/hooks/archiso_pxe_common"
+    sed -i '0,/^run_hook() {/s//archi_original_run_hook() {/' \
+        "$overlay/hooks/archiso_pxe_common"
+    sed -i '0,/^run_latehook() {/s//archi_original_run_latehook() {/' \
+        "$overlay/hooks/archiso_pxe_common"
+    cat >> "$overlay/hooks/archiso_pxe_common" <<'ARCHI_HOOK'
+
+# Added by archi.sh. The compact static ipconfig form does not populate DNS, so
+# apply our validated resolver list before archiso_http downloads the live root.
+run_hook() {
+    archi_original_run_hook
+    if [ "$(getarg 'archi_mode')" = 'install' ]; then
+        archi_dns_csv="$(getarg 'archi_dns_csv')"
+        if [ -n "${archi_dns_csv}" ]; then
+            echo '# added by archi.sh overlay' >/etc/resolv.conf
+            old_ifs=${IFS}
+            IFS=,
+            for archi_dns in ${archi_dns_csv}; do
+                [ -n "${archi_dns}" ] && echo "nameserver ${archi_dns}" >>/etc/resolv.conf
+            done
+            IFS=${old_ifs}
+        fi
+    fi
+}
+
+# Keep the network that archiso_http configured and copy our payload into the
+# live root before initramfs switches to it.
+run_latehook() {
+    if [ "$(getarg 'archi_mode')" = 'install' ]; then
+        copytoram=n
+    fi
+    archi_original_run_latehook
+    if [ "$(getarg 'archi_mode')" = 'install' ]; then
+        /archi/prepare-root.sh /new_root
+    fi
+}
+ARCHI_HOOK
+
+    cp -f -- "${BASH_SOURCE[0]}" "$overlay/archi/archi.sh"
+    chmod 0700 "$overlay/archi/archi.sh"
+    printf '%s\n' "$authorized_key" > "$overlay/archi/authorized_keys"
+    chmod 0600 "$overlay/archi/authorized_keys"
+
+    cat > "$overlay/archi/prepare-root.sh" <<'PREPARE_ROOT'
+#!/usr/bin/ash
+set -eu
+
+new_root=${1:-/new_root}
+
+getarg_value() {
+    local wanted=$1 token
+    for token in $(cat /proc/cmdline); do
+        case $token in
+            "$wanted"=*) printf '%s' "${token#*=}"; return 0 ;;
+        esac
+    done
+    return 1
+}
+
+install -Dm700 /archi/archi.sh "$new_root/root/archi.sh"
+install -dm700 "$new_root/root/.ssh"
+install -m600 /archi/authorized_keys "$new_root/root/.ssh/authorized_keys"
+install -dm755 "$new_root/etc/ssh/sshd_config.d"
+cat > "$new_root/etc/ssh/sshd_config.d/60-archi-key-only.conf" <<'SSH_CONFIG'
+PermitRootLogin prohibit-password
+PasswordAuthentication no
+KbdInteractiveAuthentication no
+SSH_CONFIG
+
+install -dm755 "$new_root/etc/systemd/system/multi-user.target.wants"
+install -m644 /archi/archi-install.service "$new_root/etc/systemd/system/archi-install.service"
+ln -sf ../archi-install.service \
+    "$new_root/etc/systemd/system/multi-user.target.wants/archi-install.service"
+
+boot_cidr=$(getarg_value archi_boot_cidr || true)
+gateway=$(getarg_value archi_gateway || true)
+boot_mac=$(getarg_value archi_boot_mac || true)
+dns_csv=$(getarg_value archi_dns_csv || true)
+dns=${dns_csv//,/ }
+install -dm755 "$new_root/etc/systemd/network"
+if [ -n "$boot_cidr" ] && [ -n "$gateway" ] && [ -n "$boot_mac" ]; then
+    cat > "$new_root/etc/systemd/network/20-archi.network" <<NETWORK
+[Match]
+MACAddress=$boot_mac
+
+[Network]
+Address=$boot_cidr
+Gateway=$gateway
+DNS=$dns
+IPv6AcceptRA=yes
+NETWORK
+else
+    cat > "$new_root/etc/systemd/network/20-archi.network" <<'NETWORK'
+[Match]
+Type=ether
+
+[Network]
+DHCP=yes
+IPv6AcceptRA=yes
+NETWORK
+fi
+chmod 0644 "$new_root/etc/systemd/network/20-archi.network"
+ln -sf /run/systemd/resolve/stub-resolv.conf "$new_root/etc/resolv.conf"
+PREPARE_ROOT
+    chmod 0755 "$overlay/archi/prepare-root.sh"
+
+    cat > "$overlay/archi/archi-install.service" <<'ARCHI_SERVICE'
+[Unit]
+Description=archi.sh unattended Arch Linux installer
+Wants=network-online.target pacman-init.service
+After=network-online.target pacman-init.service
+ConditionKernelCommandLine=archi_mode=install
+
+[Service]
+Type=oneshot
+ExecStart=/root/archi.sh
+RemainAfterExit=yes
+StandardOutput=journal+console
+StandardError=journal+console
+
+[Install]
+WantedBy=multi-user.target
+ARCHI_SERVICE
+
+    (cd "$overlay" && find . -print0 | cpio --null --quiet -o -H newc | gzip -9) > "$overlay_archive"
+    cat "$original" "$overlay_archive" > "${destination}.part"
+    mv -f -- "${destination}.part" "$destination"
+    rm -rf -- "$work"
 }
 
 first_public_key() {
@@ -314,7 +471,6 @@ cleanup_stage() {
 }
 
 stage_main() {
-    local script_url=''
     local iso_mirror=$DEFAULT_ISO_MIRROR
     local package_mirror=$DEFAULT_PACKAGE_MIRROR
     local authorized_key_file=''
@@ -322,7 +478,7 @@ stage_main() {
     local hostname
     local timezone='UTC'
     local dns=''
-    local kernel='linux'
+    local kernel='linux-lts'
     local extra_packages=''
     local swap_mib=1024
     local boot_mode='auto'
@@ -339,7 +495,6 @@ stage_main() {
 
     while (($#)); do
         case $1 in
-            --script-url) script_url=${2:?missing value}; shift 2 ;;
             --iso-mirror) iso_mirror=${2:?missing value}; shift 2 ;;
             --package-mirror) package_mirror=${2:?missing value}; shift 2 ;;
             --authorized-key-file) authorized_key_file=${2:?missing value}; shift 2 ;;
@@ -381,11 +536,9 @@ stage_main() {
     need_cmd sha256sum
     need_cmd stat
 
-    [[ -n $script_url ]] || die '--script-url is required'
     [[ -n $authorized_key_file ]] || die '--authorized-key-file is required'
     iso_mirror=$(trim_trailing_slash "$iso_mirror")
     package_mirror=$(trim_trailing_slash "$package_mirror")
-    validate_url '--script-url' "$script_url"
     validate_url '--iso-mirror' "$iso_mirror"
     validate_url '--package-mirror' "$package_mirror"
     validate_hostname "$hostname"
@@ -425,17 +578,8 @@ stage_main() {
     local boot_network
     boot_network=$(build_boot_network_parameter "$boot_interface" "$hostname" "$dns" "$bootif")
 
-    local payload_tmp payload_sha current_sha
-    payload_tmp=$(mktemp)
-    trap 'rm -f -- "${payload_tmp:-}"' RETURN
-    download_file "$script_url" "$payload_tmp" 1000
-    grep -Fq "ARCHI_PAYLOAD_ID='archi-network-reinstall-v1'" "$payload_tmp" ||
-        die 'The script URL does not contain a compatible archi payload'
-    payload_sha=$(sha256sum "$payload_tmp" | awk '{print $1}')
-    current_sha=$(sha256sum "${BASH_SOURCE[0]}" | awk '{print $1}')
-    if [[ $current_sha != "$payload_sha" ]]; then
-        warn 'The hosted payload differs from the local staging script; the hosted copy will perform the installation'
-    fi
+    local payload_sha
+    payload_sha=$(sha256sum "${BASH_SOURCE[0]}" | awk '{print $1}')
 
     local kernel_url initramfs_url airootfs_url airootfs_sig_url core_url
     kernel_url="$iso_mirror/arch/boot/x86_64/vmlinuz-linux"
@@ -475,9 +619,15 @@ EOF
         return 0
     fi
 
+    need_cmd cpio
+    need_cmd find
+    need_cmd gzip
     mkdir -p -- "$install_dir"
     download_file "$kernel_url" "$install_dir/vmlinuz-linux" 8000000
-    download_file "$initramfs_url" "$install_dir/initramfs-linux.img" 30000000
+    download_file "$initramfs_url" "$install_dir/initramfs-linux.img.official" 30000000
+    build_archiso_overlay "$install_dir/initramfs-linux.img.official" \
+        "$install_dir/initramfs-linux.img" "$authorized_key"
+    rm -f -- "$install_dir/initramfs-linux.img.official"
 
     local disk_b64 hostname_b64 timezone_b64 dns_b64 key_b64 package_mirror_b64
     local extra_packages_b64 kernel_b64
@@ -489,6 +639,22 @@ EOF
     package_mirror_b64=$(encode_b64 "$package_mirror")
     extra_packages_b64=$(encode_b64 "$extra_packages")
     kernel_b64=$(encode_b64 "$kernel")
+
+    local boot_cidr boot_gateway boot_mac dns_csv
+    boot_cidr=$(ip -4 -o address show dev "$boot_interface" scope global 2>/dev/null |
+        awk 'NR == 1 { print $4 }')
+    boot_gateway=$(ip -4 route show default dev "$boot_interface" 2>/dev/null | awk '
+        { for (i = 1; i <= NF; i++) if ($i == "via") { print $(i + 1); exit } }
+    ')
+    boot_mac=${bootif#01-}
+    boot_mac=${boot_mac//-/:}
+    boot_mac=${boot_mac,,}
+    dns_csv=${dns// /,}
+    [[ $dns_csv =~ ^[0-9.,]*$ ]] || die 'DNS must contain only IPv4 addresses'
+    if [[ $boot_cidr != */* || -z $boot_gateway ]]; then
+        boot_cidr=''
+        boot_gateway=''
+    fi
 
     local grub_prefix grub_stage_dir grub_kernel grub_initramfs hold_flag power_flag
     if mountpoint -q /boot; then
@@ -526,7 +692,7 @@ menuentry 'Arch Linux network reinstall (ERASES TARGET DISK)' --id archi {
     insmod part_gpt
     insmod part_msdos
     insmod ext2
-    linux $grub_kernel archisobasedir=arch archiso_http_srv=$iso_mirror $boot_network cms_verify=y script=$script_url archi_mode=install archi_payload_sha256=$payload_sha archi_disk_b64=$disk_b64 archi_hostname_b64=$hostname_b64 archi_timezone_b64=$timezone_b64 archi_dns_b64=$dns_b64 archi_key_b64=$key_b64 archi_package_mirror_b64=$package_mirror_b64 archi_extra_packages_b64=$extra_packages_b64 archi_kernel_b64=$kernel_b64 archi_boot_mode=$boot_mode archi_swap_mib=$swap_mib archi_hold=$hold_flag archi_poweroff=$power_flag
+    linux $grub_kernel archisobasedir=arch archiso_http_srv=$iso_mirror/ $boot_network cms_verify=y archi_mode=install archi_payload_sha256=$payload_sha archi_disk_b64=$disk_b64 archi_hostname_b64=$hostname_b64 archi_timezone_b64=$timezone_b64 archi_dns_b64=$dns_b64 archi_key_b64=$key_b64 archi_package_mirror_b64=$package_mirror_b64 archi_extra_packages_b64=$extra_packages_b64 archi_kernel_b64=$kernel_b64 archi_boot_mode=$boot_mode archi_swap_mib=$swap_mib archi_hold=$hold_flag archi_poweroff=$power_flag archi_boot_cidr=$boot_cidr archi_gateway=$boot_gateway archi_boot_mac=$boot_mac archi_dns_csv=$dns_csv
     initrd $grub_initramfs
 }
 EOF
@@ -596,7 +762,7 @@ installer_main() {
         die "Installer payload checksum mismatch (expected $expected_sha, got $actual_sha)"
 
     local disk hostname timezone dns authorized_key package_mirror extra_packages kernel
-    local boot_mode swap_mib hold power_off
+    local boot_mode swap_mib hold power_off boot_cidr boot_gateway boot_mac
     disk=$(decode_b64 "$(cmdline_value archi_disk_b64)")
     hostname=$(decode_b64 "$(cmdline_value archi_hostname_b64)")
     timezone=$(decode_b64 "$(cmdline_value archi_timezone_b64)")
@@ -609,6 +775,9 @@ installer_main() {
     swap_mib=$(cmdline_value archi_swap_mib)
     hold=$(cmdline_value archi_hold)
     power_off=$(cmdline_value archi_poweroff)
+    boot_cidr=$(cmdline_value archi_boot_cidr || true)
+    boot_gateway=$(cmdline_value archi_gateway || true)
+    boot_mac=$(cmdline_value archi_boot_mac || true)
 
     validate_hostname "$hostname"
     validate_packages "$extra_packages"
@@ -633,7 +802,6 @@ EOF
     cp -f -- "${BASH_SOURCE[0]}" /root/archi-installer.sh
     chmod 0700 /root/archi-installer.sh
 
-    systemctl start pacman-init.service 2>/dev/null || true
     printf 'Server = %s\n' "$package_mirror" > /etc/pacman.d/mirrorlist
     local core_url
     core_url=${package_mirror//\$repo/core}
@@ -653,7 +821,7 @@ EOF
     if [[ $hold == 1 && ${ARCHI_FORCE_INSTALL:-0} != 1 ]]; then
         log 'Hold mode is active; no disk changes were made.'
         log 'SSH is available with the supplied root key.'
-        log 'To continue destructively: ARCHI_FORCE_INSTALL=1 /tmp/startup_script'
+        log 'To continue destructively: ARCHI_FORCE_INSTALL=1 /root/archi.sh'
         return 0
     fi
 
@@ -704,7 +872,9 @@ EOF
 
     log "Installing packages: ${packages[*]}"
     pacstrap -K /mnt "${packages[@]}"
+    chmod 0755 /mnt/etc
     genfstab -U /mnt > /mnt/etc/fstab
+    chmod 0644 /mnt/etc/fstab
 
     if (( swap_mib > 0 )); then
         fallocate -l "${swap_mib}M" /mnt/swapfile
@@ -724,9 +894,22 @@ EOF
 ::1 localhost
 127.0.1.1 $hostname
 EOF
+    chmod 0644 /mnt/etc/locale.conf /mnt/etc/hostname /mnt/etc/hosts
 
     install -d -m 0755 /mnt/etc/systemd/network
-    cat > /mnt/etc/systemd/network/20-wired.network <<EOF
+    if [[ -n $boot_cidr && -n $boot_gateway && -n $boot_mac ]]; then
+        cat > /mnt/etc/systemd/network/20-wired.network <<EOF
+[Match]
+MACAddress=$boot_mac
+
+[Network]
+Address=$boot_cidr
+Gateway=$boot_gateway
+IPv6AcceptRA=yes
+${dns:+DNS=$dns}
+EOF
+    else
+        cat > /mnt/etc/systemd/network/20-wired.network <<EOF
 [Match]
 Type=ether
 
@@ -735,6 +918,8 @@ DHCP=yes
 IPv6AcceptRA=yes
 ${dns:+DNS=$dns}
 EOF
+    fi
+    chmod 0644 /mnt/etc/systemd/network/20-wired.network
     ln -sf /run/systemd/resolve/stub-resolv.conf /mnt/etc/resolv.conf
     systemctl --root=/mnt enable systemd-networkd.service systemd-resolved.service sshd.service
 
@@ -747,6 +932,7 @@ PermitRootLogin prohibit-password
 PasswordAuthentication no
 KbdInteractiveAuthentication no
 EOF
+    chmod 0644 /mnt/etc/ssh/sshd_config.d/60-key-only.conf
     arch-chroot /mnt passwd --lock root
 
     if [[ $boot_mode == efi ]]; then
