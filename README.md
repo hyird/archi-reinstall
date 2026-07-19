@@ -123,6 +123,7 @@ ARCHI_FORCE_INSTALL=1 /root/archi.sh
 | `--firmware` | 安装 `linux-firmware` |
 | `--install "PKG ..."` | 安装额外 Arch 官方仓库包 |
 | `--bbr` | 启用 fq + TCP BBR |
+| `--fail2ban` | 安装并启用使用 systemd 日志和 nftables 的 SSH jail |
 | `--ethx` | eth0 风格命名，默认开启 |
 | `--predictable-names` | 保留 systemd 可预测网卡名 |
 | `--swap-mib N` | 显式创建 N MiB swap；默认 0 |
@@ -130,6 +131,8 @@ ARCHI_FORCE_INSTALL=1 /root/archi.sh
 | `--power-off` | 安装成功后关机而非重启 |
 
 完整列表请运行 `./archi.sh --help`。
+
+启用 `--fail2ban` 后，默认规则为 10 分钟内失败 5 次封禁 1 小时，使用 aggressive SSH 过滤模式；监控端口会跟随 `--ssh-port`。默认不安装 Fail2ban。
 
 ## 网络与 DNS 探测
 

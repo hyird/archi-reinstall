@@ -12,7 +12,7 @@ shopt -s inherit_errexit 2>/dev/null || true
 umask 077
 
 readonly ARCHI_PAYLOAD_ID='archi-network-reinstall-v1'
-readonly ARCHI_VERSION='0.7.1'
+readonly ARCHI_VERSION='0.7.2'
 readonly DEFAULT_ALPINE_MIRROR='https://dl-cdn.alpinelinux.org/alpine'
 # The pacman placeholders must remain literal until the installer writes mirrorlist.
 readonly DEFAULT_PACKAGE_MIRROR="https://geo.mirror.pkgbuild.com/\$repo/os/\$arch"
@@ -67,6 +67,7 @@ Stage options:
   --ntp HOST                  NTP server (default: time.cloudflare.com).
   --ssh-port PORT             SSH port in Alpine and installed Arch (default: 22).
   --bbr                       Enable fq + TCP BBR in the installed system.
+  --fail2ban                  Install an nftables-backed SSH jail (off by default).
   --firmware                  Install linux-firmware (off by default for cloud VMs).
   --cloud-kernel              Re-apply the default cloud kernel/profile.
   --ethx                      Use eth0-style names (default, official udev method).
@@ -604,7 +605,7 @@ stage_main() {
     local requested_netmask=''
     local requested_gateway=''
     local ssh_port=22
-    local bbr=false firmware=false ethx=true
+    local bbr=false fail2ban=false firmware=false ethx=true
     local kernel='linux-lts'
     local extra_packages=''
     local swap_mib=0
@@ -642,6 +643,8 @@ stage_main() {
             --ntp) ntp=${2:?missing value}; shift 2 ;;
             --ssh-port) ssh_port=${2:?missing value}; shift 2 ;;
             --bbr) bbr=true; shift ;;
+            --fail2ban) fail2ban=true; shift ;;
+            --no-fail2ban) fail2ban=false; shift ;;
             --firmware) firmware=true; shift ;;
             --no-firmware) firmware=false; shift ;;
             --cloud-kernel) kernel=linux-lts; firmware=false; shift ;;
@@ -827,6 +830,7 @@ stage_main() {
   kernel package:    $kernel
   firmware bundle:   $firmware
   TCP BBR:           $bbr
+  Fail2ban:          $fail2ban
   eth0 naming:       $ethx
   swap:              ${swap_mib} MiB
   GRUB timeout:      ${grub_timeout}s
@@ -903,6 +907,7 @@ ssh_port=$ssh_port
 kernel=$kernel
 firmware=$firmware
 bbr=$bbr
+fail2ban=$fail2ban
 ethx=$ethx
 grub_timeout=$grub_timeout
 payload_sha256=$payload_sha
@@ -918,7 +923,7 @@ menuentry 'Arch Linux network reinstall (ERASES TARGET DISK)' --id archi {
     insmod part_gpt
     insmod part_msdos
     insmod ext2
-    linux $grub_kernel modules=loop,squashfs,sd_mod,usb_storage,virtio_scsi,virtio_blk alpine_repo=$alpine_mirror/latest-stable/main,$alpine_mirror/latest-stable/community apkovl=/archi.apkovl.tar.gz init=/root/archi-init $boot_network archi_mode=install archi_payload_sha256=$payload_sha archi_disk_b64=$disk_b64 archi_hostname_b64=$hostname_b64 archi_timezone_b64=$timezone_b64 archi_dns_b64=$dns_b64 archi_key_b64=$key_b64 archi_package_mirror_b64=$package_mirror_b64 archi_extra_packages_b64=$extra_packages_b64 archi_kernel_b64=$kernel_b64 archi_ntp_b64=$ntp_b64 archi_boot_mode=$boot_mode archi_swap_mib=$swap_mib archi_hold=$hold_flag archi_poweroff=$power_flag archi_boot_cidr=$boot_cidr archi_gateway=$boot_gateway archi_boot_mac=$boot_mac archi_dns_csv=$dns_csv archi_ssh_port=$ssh_port archi_bbr=$bbr archi_firmware=$firmware archi_ethx=$ethx archi_grub_timeout=$grub_timeout
+    linux $grub_kernel modules=loop,squashfs,sd_mod,usb_storage,virtio_scsi,virtio_blk alpine_repo=$alpine_mirror/latest-stable/main,$alpine_mirror/latest-stable/community apkovl=/archi.apkovl.tar.gz init=/root/archi-init $boot_network archi_mode=install archi_payload_sha256=$payload_sha archi_disk_b64=$disk_b64 archi_hostname_b64=$hostname_b64 archi_timezone_b64=$timezone_b64 archi_dns_b64=$dns_b64 archi_key_b64=$key_b64 archi_package_mirror_b64=$package_mirror_b64 archi_extra_packages_b64=$extra_packages_b64 archi_kernel_b64=$kernel_b64 archi_ntp_b64=$ntp_b64 archi_boot_mode=$boot_mode archi_swap_mib=$swap_mib archi_hold=$hold_flag archi_poweroff=$power_flag archi_boot_cidr=$boot_cidr archi_gateway=$boot_gateway archi_boot_mac=$boot_mac archi_dns_csv=$dns_csv archi_ssh_port=$ssh_port archi_bbr=$bbr archi_fail2ban=$fail2ban archi_firmware=$firmware archi_ethx=$ethx archi_grub_timeout=$grub_timeout
     initrd $grub_initramfs
 }
 EOF
@@ -997,7 +1002,7 @@ installer_main() {
 
     local disk hostname timezone dns authorized_key package_mirror extra_packages kernel ntp
     local boot_mode swap_mib hold power_off boot_cidr boot_gateway boot_mac
-    local ssh_port bbr firmware ethx grub_timeout
+    local ssh_port bbr fail2ban firmware ethx grub_timeout
     disk=$(decode_b64 "$(cmdline_value archi_disk_b64)")
     hostname=$(decode_b64 "$(cmdline_value archi_hostname_b64)")
     timezone=$(decode_b64 "$(cmdline_value archi_timezone_b64)")
@@ -1016,6 +1021,7 @@ installer_main() {
     boot_mac=$(cmdline_value archi_boot_mac || true)
     ssh_port=$(cmdline_value archi_ssh_port)
     bbr=$(cmdline_value archi_bbr)
+    fail2ban=$(cmdline_value archi_fail2ban)
     firmware=$(cmdline_value archi_firmware)
     ethx=$(cmdline_value archi_ethx)
     grub_timeout=$(cmdline_value archi_grub_timeout)
@@ -1030,6 +1036,7 @@ installer_main() {
     [[ $kernel == linux || $kernel == linux-lts ]] || die 'Invalid kernel package'
     validate_port "$ssh_port"
     [[ $bbr == true || $bbr == false ]] || die 'Invalid BBR setting'
+    [[ $fail2ban == true || $fail2ban == false ]] || die 'Invalid Fail2ban setting'
     [[ $firmware == true || $firmware == false ]] || die 'Invalid firmware setting'
     [[ $ethx == true || $ethx == false ]] || die 'Invalid ethx setting'
     [[ $grub_timeout =~ ^[0-9]+$ && $grub_timeout -le 60 ]] || die 'Invalid GRUB timeout'
@@ -1055,6 +1062,12 @@ Port $ssh_port
 PermitRootLogin prohibit-password
 PasswordAuthentication no
 KbdInteractiveAuthentication no
+PermitEmptyPasswords no
+LoginGraceTime 30
+MaxAuthTries 3
+MaxStartups 10:30:30
+PerSourceMaxStartups 3
+X11Forwarding no
 EOF
     chmod 0644 /etc/ssh/sshd_config.d/60-archi-key-only.conf
     cp -f -- "${BASH_SOURCE[0]}" /root/archi-installer.sh
@@ -1078,6 +1091,7 @@ EOF
   NTP:              $ntp
   firmware bundle:  $firmware
   TCP BBR:          $bbr
+  Fail2ban:         $fail2ban
   swap:             ${swap_mib} MiB
 EOF
 
@@ -1135,6 +1149,7 @@ EOF
         base "$kernel" grub openssh sudo qemu-guest-agent
         inetutils coreutils bash-completion wget curl vim nano cpio
     )
+    [[ $fail2ban == true ]] && packages+=(fail2ban)
     [[ $firmware == true ]] && packages+=(linux-firmware)
     if [[ $boot_mode == efi ]]; then packages+=(efibootmgr); fi
     case $(awk -F: '/vendor_id/ {gsub(/[[:space:]]/, "", $2); print $2; exit}' /proc/cpuinfo) in
@@ -1257,6 +1272,27 @@ X11Forwarding no
 EOF
     chmod 0644 /mnt/etc/ssh/sshd_config.d/60-key-only.conf
     arch-chroot /mnt passwd --lock root
+
+    if [[ $fail2ban == true ]]; then
+        install -d -m 0755 /mnt/etc/fail2ban/jail.d
+        cat > /mnt/etc/fail2ban/jail.d/sshd.local <<EOF
+[DEFAULT]
+backend = systemd
+banaction = nftables-multiport
+banaction_allports = nftables-allports
+bantime = 1h
+findtime = 10m
+maxretry = 5
+
+[sshd]
+enabled = true
+port = $ssh_port
+mode = aggressive
+EOF
+        chmod 0644 /mnt/etc/fail2ban/jail.d/sshd.local
+        arch-chroot /mnt fail2ban-client -t
+        arch-chroot /mnt systemctl enable fail2ban.service
+    fi
 
     if [[ $boot_mode == efi ]]; then
         arch-chroot /mnt grub-install --target=x86_64-efi --efi-directory=/boot \
