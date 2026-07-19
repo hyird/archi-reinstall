@@ -11,8 +11,9 @@
 - 临时环境主机名 `alpine`，最终主机名 `arch`。
 - Arch `linux-lts` 内核；默认不安装 `linux-firmware`。
 - 安装并启用 `qemu-guest-agent`。
-- 默认安装 `inetutils`、`coreutils`、`bash-completion`、`wget`、`curl`、`vim` 和 `nano`，并保留脚本再次 staging 所需的 `cpio`。
+- 默认安装 `inetutils`、`coreutils`、`bash-completion`、`wget`、`curl`、`vim` 和 `nano`，并保留脚本再次 staging 所需的 `cpio`；不安装无线组件。
 - root 密码锁定，仅允许指定公钥登录，SSH 端口 22。
+- SSH 默认限制认证次数、并发预认证连接和单一来源并发数，降低公网扫描噪声。
 - 自动继承当前默认网卡的 IPv4、网关、DNS 和 MAC；信息不完整时回退 DHCP。
 - 最终网络使用 `systemd-networkd`、`systemd-resolved` 和 `systemd-timesyncd`。
 - 默认采用 eth0 风格命名，按官方方式创建 `/etc/udev/rules.d/80-net-setup-link.rules -> /dev/null`。

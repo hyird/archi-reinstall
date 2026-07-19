@@ -12,7 +12,7 @@ shopt -s inherit_errexit 2>/dev/null || true
 umask 077
 
 readonly ARCHI_PAYLOAD_ID='archi-network-reinstall-v1'
-readonly ARCHI_VERSION='0.7.0'
+readonly ARCHI_VERSION='0.7.1'
 readonly DEFAULT_ALPINE_MIRROR='https://dl-cdn.alpinelinux.org/alpine'
 # The pacman placeholders must remain literal until the installer writes mirrorlist.
 readonly DEFAULT_PACKAGE_MIRROR="https://geo.mirror.pkgbuild.com/\$repo/os/\$arch"
@@ -408,6 +408,12 @@ Port $ssh_port
 PermitRootLogin prohibit-password
 PasswordAuthentication no
 KbdInteractiveAuthentication no
+PermitEmptyPasswords no
+LoginGraceTime 30
+MaxAuthTries 3
+MaxStartups 10:30:30
+PerSourceMaxStartups 3
+X11Forwarding no
 EOF
     printf '%s\n' "$authorized_key" > "$apkovl/root/.ssh/authorized_keys"
     cp -f -- "${BASH_SOURCE[0]}" "$apkovl/root/archi.sh"
@@ -1138,6 +1144,10 @@ EOF
     local package
     for package in $extra_packages; do packages+=("$package"); done
 
+    install -d -m 0755 /mnt/etc
+    printf 'KEYMAP=us\n' > /mnt/etc/vconsole.conf
+    chmod 0644 /mnt/etc/vconsole.conf
+
     log "Installing packages: ${packages[*]}"
     local pacstrap_ok=false
     for _ in 1 2 3; do
@@ -1176,6 +1186,14 @@ EOF
 127.0.1.1 $hostname
 EOF
     chmod 0644 /mnt/etc/locale.conf /mnt/etc/hostname /mnt/etc/hosts
+
+    install -d -m 0755 /mnt/etc/modprobe.d
+    cat > /mnt/etc/modprobe.d/60-archi-cloud.conf <<'EOF'
+# archi.sh supports wired cloud networking only. Avoid loading the wireless
+# regulatory stack and its firmware database on machines without Wi-Fi.
+blacklist cfg80211
+EOF
+    chmod 0644 /mnt/etc/modprobe.d/60-archi-cloud.conf
 
     install -d -m 0755 /mnt/etc/systemd/timesyncd.conf.d
     cat > /mnt/etc/systemd/timesyncd.conf.d/60-archi-cloud.conf <<EOF
@@ -1230,6 +1248,12 @@ Port $ssh_port
 PermitRootLogin prohibit-password
 PasswordAuthentication no
 KbdInteractiveAuthentication no
+PermitEmptyPasswords no
+LoginGraceTime 30
+MaxAuthTries 3
+MaxStartups 10:30:30
+PerSourceMaxStartups 3
+X11Forwarding no
 EOF
     chmod 0644 /mnt/etc/ssh/sshd_config.d/60-key-only.conf
     arch-chroot /mnt passwd --lock root
@@ -1244,6 +1268,12 @@ EOF
         -e "s/^GRUB_TIMEOUT=.*/GRUB_TIMEOUT=$grub_timeout/" \
         -e 's/^GRUB_TIMEOUT_STYLE=.*/GRUB_TIMEOUT_STYLE=menu/' \
         /mnt/etc/default/grub
+    if grep -qE '^#?GRUB_DISABLE_OS_PROBER=' /mnt/etc/default/grub; then
+        sed -i -E 's/^#?GRUB_DISABLE_OS_PROBER=.*/GRUB_DISABLE_OS_PROBER=true/' \
+            /mnt/etc/default/grub
+    else
+        printf '\nGRUB_DISABLE_OS_PROBER=true\n' >> /mnt/etc/default/grub
+    fi
     if [[ $ethx == true ]]; then
         install -d -m 0755 /mnt/etc/udev/rules.d
         ln -sfn /dev/null /mnt/etc/udev/rules.d/80-net-setup-link.rules
