@@ -12,7 +12,7 @@ shopt -s inherit_errexit 2>/dev/null || true
 umask 077
 
 readonly ARCHI_PAYLOAD_ID='archi-network-reinstall-v1'
-readonly ARCHI_VERSION='0.1.1'
+readonly ARCHI_VERSION='0.2.0'
 readonly DEFAULT_ISO_MIRROR='https://geo.mirror.pkgbuild.com/iso/latest'
 # The pacman placeholders must remain literal until the installer writes mirrorlist.
 # shellcheck disable=SC2016
@@ -69,8 +69,9 @@ Stage options:
   --help                       Show this help.
   --version                    Show script version.
 
-The target must be x86_64, use GRUB 2, have wired DHCP during ArchISO boot,
-and have enough RAM for the network live image (2 GiB minimum recommended).
+The target must be x86_64, use GRUB 2, have wired IPv4 connectivity, and have
+enough RAM for the network live image (2 GiB minimum recommended). The current
+IPv4 route is preserved for ArchISO boot, with DHCP as a fallback.
 EOF
 }
 
@@ -166,6 +167,59 @@ detect_bootif() {
     [[ $mac =~ ^([[:xdigit:]]{2}:){5}[[:xdigit:]]{2}$ && $mac != 00:00:00:00:00:00 ]] ||
         die "Invalid MAC address on boot interface $interface: $mac"
     printf '%s %s\n' "$interface" "01-${mac//:/-}"
+}
+
+prefix_to_netmask() {
+    local prefix=$1 octet bits value result=''
+    if [[ ! $prefix =~ ^[0-9]+$ ]] || (( prefix > 32 )); then
+        die "Invalid IPv4 prefix: $prefix"
+    fi
+    for octet in 0 1 2 3; do
+        bits=$((prefix - octet * 8))
+        if (( bits >= 8 )); then
+            value=255
+        elif (( bits <= 0 )); then
+            value=0
+        else
+            value=$((256 - 2 ** (8 - bits)))
+        fi
+        result+="${result:+.}$value"
+    done
+    printf '%s\n' "$result"
+}
+
+detect_dns_servers() {
+    local interface=$1 detected=''
+    if command -v resolvectl >/dev/null 2>&1; then
+        detected=$(resolvectl dns "$interface" 2>/dev/null | awk -F: '
+            NR == 1 { for (i = 2; i <= NF; i++) if ($i ~ /^[[:space:]]*[0-9]+(\.[0-9]+){3}[[:space:]]*$/) printf "%s ", $i }
+        ' || true)
+    fi
+    if [[ -z ${detected//[[:space:]]/} && -r /etc/resolv.conf ]]; then
+        detected=$(awk '
+            $1 == "nameserver" && $2 ~ /^[0-9]+(\.[0-9]+){3}$/ && $2 !~ /^127\./ { printf "%s ", $2 }
+        ' /etc/resolv.conf)
+    fi
+    printf '%s\n' "$detected"
+}
+
+build_boot_network_parameter() {
+    local interface=$1 hostname=$2 dns=$3 cidr address prefix gateway netmask dns0='' dns1=''
+    cidr=$(ip -4 -o address show dev "$interface" scope global 2>/dev/null |
+        awk 'NR == 1 { print $4 }')
+    gateway=$(ip -4 route show default dev "$interface" 2>/dev/null | awk '
+        { for (i = 1; i <= NF; i++) if ($i == "via") { print $(i + 1); exit } }
+    ')
+    if [[ $cidr == */* && -n $gateway ]]; then
+        address=${cidr%/*}
+        prefix=${cidr#*/}
+        netmask=$(prefix_to_netmask "$prefix")
+        read -r dns0 dns1 _ <<< "$dns"
+        printf 'ip=%s::%s:%s:%s::none:%s:%s\n' \
+            "$address" "$gateway" "$netmask" "$hostname" "$dns0" "$dns1"
+    else
+        printf 'ip=dhcp\n'
+    fi
 }
 
 first_public_key() {
@@ -363,6 +417,9 @@ stage_main() {
     local boot_interface bootif
     read -r boot_interface bootif < <(detect_bootif)
     bootif=${bootif^^}
+    if [[ -z $dns ]]; then dns=$(detect_dns_servers "$boot_interface"); fi
+    local boot_network
+    boot_network=$(build_boot_network_parameter "$boot_interface" "$hostname" "$dns")
 
     local payload_tmp payload_sha current_sha
     payload_tmp=$(mktemp)
@@ -400,6 +457,7 @@ stage_main() {
   ISO mirror:        $iso_mirror
   package mirror:    $package_mirror
   boot interface:    $boot_interface (${bootif#01-})
+  boot network:      $boot_network
   payload SHA-256:   $payload_sha
   root SSH key:      $(printf '%s' "$authorized_key" | awk '{print $1, $NF}')
   kernel package:    $kernel
@@ -448,6 +506,7 @@ disk=$disk
 boot_mode=$boot_mode
 boot_interface=$boot_interface
 bootif=$bootif
+boot_network=$boot_network
 iso_mirror=$iso_mirror
 package_mirror=$package_mirror
 payload_sha256=$payload_sha
@@ -463,7 +522,7 @@ menuentry 'Arch Linux network reinstall (ERASES TARGET DISK)' --id archi {
     insmod part_gpt
     insmod part_msdos
     insmod ext2
-    linux $grub_kernel archisobasedir=arch archiso_http_srv=$iso_mirror ip=dhcp BOOTIF=$bootif cms_verify=y script=$script_url archi_mode=install archi_payload_sha256=$payload_sha archi_disk_b64=$disk_b64 archi_hostname_b64=$hostname_b64 archi_timezone_b64=$timezone_b64 archi_dns_b64=$dns_b64 archi_key_b64=$key_b64 archi_package_mirror_b64=$package_mirror_b64 archi_extra_packages_b64=$extra_packages_b64 archi_kernel_b64=$kernel_b64 archi_boot_mode=$boot_mode archi_swap_mib=$swap_mib archi_hold=$hold_flag archi_poweroff=$power_flag
+    linux $grub_kernel archisobasedir=arch archiso_http_srv=$iso_mirror $boot_network BOOTIF=$bootif cms_verify=y script=$script_url archi_mode=install archi_payload_sha256=$payload_sha archi_disk_b64=$disk_b64 archi_hostname_b64=$hostname_b64 archi_timezone_b64=$timezone_b64 archi_dns_b64=$dns_b64 archi_key_b64=$key_b64 archi_package_mirror_b64=$package_mirror_b64 archi_extra_packages_b64=$extra_packages_b64 archi_kernel_b64=$kernel_b64 archi_boot_mode=$boot_mode archi_swap_mib=$swap_mib archi_hold=$hold_flag archi_poweroff=$power_flag
     initrd $grub_initramfs
 }
 EOF
