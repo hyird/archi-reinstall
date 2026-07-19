@@ -12,7 +12,7 @@ shopt -s inherit_errexit 2>/dev/null || true
 umask 077
 
 readonly ARCHI_PAYLOAD_ID='archi-network-reinstall-v1'
-readonly ARCHI_VERSION='0.1.0'
+readonly ARCHI_VERSION='0.1.1'
 readonly DEFAULT_ISO_MIRROR='https://geo.mirror.pkgbuild.com/iso/latest'
 readonly DEFAULT_PACKAGE_MIRROR='https://geo.mirror.pkgbuild.com/$repo/os/$arch'
 readonly DEFAULT_INSTALL_DIR='/boot/archi-reinstall'
@@ -141,6 +141,29 @@ detect_root_disk() {
     [[ ${#disks[@]} -eq 1 ]] ||
         die "Could not safely determine the target disk; use --disk"
     printf '%s\n' "${disks[0]}"
+}
+
+detect_bootif() {
+    local interface='' interface_path mac=''
+
+    interface=$(ip -o route show default 2>/dev/null | awk '
+        { for (i = 1; i <= NF; i++) if ($i == "dev") { print $(i + 1); exit } }
+    ')
+    if [[ -z $interface ]]; then
+        for interface_path in /sys/class/net/*; do
+            [[ ${interface_path##*/} == lo ]] && continue
+            [[ -r $interface_path/address ]] || continue
+            interface=${interface_path##*/}
+            break
+        done
+    fi
+
+    [[ -n $interface && -r /sys/class/net/$interface/address ]] ||
+        die 'Could not determine the boot network interface from the default route'
+    mac=$(<"/sys/class/net/$interface/address")
+    [[ $mac =~ ^([[:xdigit:]]{2}:){5}[[:xdigit:]]{2}$ && $mac != 00:00:00:00:00:00 ]] ||
+        die "Invalid MAC address on boot interface $interface: $mac"
+    printf '%s %s\n' "$interface" "01-${mac//:/-}"
 }
 
 first_public_key() {
@@ -293,6 +316,7 @@ stage_main() {
     need_cmd curl
     need_cmd findmnt
     need_cmd grub-install
+    need_cmd ip
     need_cmd lsblk
     need_cmd sha256sum
     need_cmd stat
@@ -334,6 +358,10 @@ stage_main() {
     authorized_key=$(first_public_key "$authorized_key_file")
     [[ -n $authorized_key ]] || die "No supported SSH public key found in $authorized_key_file"
 
+    local boot_interface bootif
+    read -r boot_interface bootif < <(detect_bootif)
+    bootif=${bootif^^}
+
     local payload_tmp payload_sha current_sha
     payload_tmp=$(mktemp)
     trap 'rm -f -- "${payload_tmp:-}"' RETURN
@@ -369,6 +397,7 @@ stage_main() {
   timezone:          $timezone
   ISO mirror:        $iso_mirror
   package mirror:    $package_mirror
+  boot interface:    $boot_interface (${bootif#01-})
   payload SHA-256:   $payload_sha
   root SSH key:      $(printf '%s' "$authorized_key" | awk '{print $1, $NF}')
   kernel package:    $kernel
@@ -415,6 +444,8 @@ version=$ARCHI_VERSION
 created=$(date -Is)
 disk=$disk
 boot_mode=$boot_mode
+boot_interface=$boot_interface
+bootif=$bootif
 iso_mirror=$iso_mirror
 package_mirror=$package_mirror
 payload_sha256=$payload_sha
@@ -430,7 +461,7 @@ menuentry 'Arch Linux network reinstall (ERASES TARGET DISK)' --id archi {
     insmod part_gpt
     insmod part_msdos
     insmod ext2
-    linux $grub_kernel archisobasedir=arch archiso_http_srv=$iso_mirror ip=dhcp cms_verify=y script=$script_url archi_mode=install archi_payload_sha256=$payload_sha archi_disk_b64=$disk_b64 archi_hostname_b64=$hostname_b64 archi_timezone_b64=$timezone_b64 archi_dns_b64=$dns_b64 archi_key_b64=$key_b64 archi_package_mirror_b64=$package_mirror_b64 archi_extra_packages_b64=$extra_packages_b64 archi_kernel_b64=$kernel_b64 archi_boot_mode=$boot_mode archi_swap_mib=$swap_mib archi_hold=$hold_flag archi_poweroff=$power_flag
+    linux $grub_kernel archisobasedir=arch archiso_http_srv=$iso_mirror ip=dhcp BOOTIF=$bootif cms_verify=y script=$script_url archi_mode=install archi_payload_sha256=$payload_sha archi_disk_b64=$disk_b64 archi_hostname_b64=$hostname_b64 archi_timezone_b64=$timezone_b64 archi_dns_b64=$dns_b64 archi_key_b64=$key_b64 archi_package_mirror_b64=$package_mirror_b64 archi_extra_packages_b64=$extra_packages_b64 archi_kernel_b64=$kernel_b64 archi_boot_mode=$boot_mode archi_swap_mib=$swap_mib archi_hold=$hold_flag archi_poweroff=$power_flag
     initrd $grub_initramfs
 }
 EOF
