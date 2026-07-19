@@ -12,7 +12,7 @@ shopt -s inherit_errexit 2>/dev/null || true
 umask 077
 
 readonly ARCHI_PAYLOAD_ID='archi-network-reinstall-v1'
-readonly ARCHI_VERSION='0.2.2'
+readonly ARCHI_VERSION='0.3.0'
 readonly DEFAULT_ISO_MIRROR='https://geo.mirror.pkgbuild.com/iso/latest'
 # The pacman placeholders must remain literal until the installer writes mirrorlist.
 # shellcheck disable=SC2016
@@ -204,7 +204,8 @@ detect_dns_servers() {
 }
 
 build_boot_network_parameter() {
-    local interface=$1 dns=$2 cidr address prefix gateway netmask dns0=''
+    local interface=$1 hostname=$2 dns=$3 bootif=$4
+    local cidr address prefix gateway netmask dns0='' dns1=''
     cidr=$(ip -4 -o address show dev "$interface" scope global 2>/dev/null |
         awk 'NR == 1 { print $4 }')
     gateway=$(ip -4 route show default dev "$interface" 2>/dev/null | awk '
@@ -214,13 +215,14 @@ build_boot_network_parameter() {
         address=${cidr%/*}
         prefix=${cidr#*/}
         netmask=$(prefix_to_netmask "$prefix")
-        read -r dns0 _ <<< "$dns"
+        read -r dns0 dns1 _ <<< "$dns"
         [[ -n $dns0 ]] || dns0=$gateway
-        # archiso_pxe_common appends "::<device>" after resolving BOOTIF.
-        # klibc ipconfig also treats its server field as the DNS server.
-        printf 'ip=%s:%s:%s:%s\n' "$address" "$dns0" "$gateway" "$netmask"
+        # BOOTIF makes archiso_pxe_common append another device field, so a
+        # static configuration with DNS must provide the full form itself.
+        printf 'ip=%s::%s:%s:%s:eth0:none:%s:%s net.ifnames=0\n' \
+            "$address" "$gateway" "$netmask" "$hostname" "$dns0" "$dns1"
     else
-        printf 'ip=dhcp\n'
+        printf 'ip=dhcp BOOTIF=%s\n' "$bootif"
     fi
 }
 
@@ -421,7 +423,7 @@ stage_main() {
     bootif=${bootif^^}
     if [[ -z $dns ]]; then dns=$(detect_dns_servers "$boot_interface"); fi
     local boot_network
-    boot_network=$(build_boot_network_parameter "$boot_interface" "$dns")
+    boot_network=$(build_boot_network_parameter "$boot_interface" "$hostname" "$dns" "$bootif")
 
     local payload_tmp payload_sha current_sha
     payload_tmp=$(mktemp)
@@ -524,7 +526,7 @@ menuentry 'Arch Linux network reinstall (ERASES TARGET DISK)' --id archi {
     insmod part_gpt
     insmod part_msdos
     insmod ext2
-    linux $grub_kernel archisobasedir=arch archiso_http_srv=$iso_mirror $boot_network BOOTIF=$bootif cms_verify=y script=$script_url archi_mode=install archi_payload_sha256=$payload_sha archi_disk_b64=$disk_b64 archi_hostname_b64=$hostname_b64 archi_timezone_b64=$timezone_b64 archi_dns_b64=$dns_b64 archi_key_b64=$key_b64 archi_package_mirror_b64=$package_mirror_b64 archi_extra_packages_b64=$extra_packages_b64 archi_kernel_b64=$kernel_b64 archi_boot_mode=$boot_mode archi_swap_mib=$swap_mib archi_hold=$hold_flag archi_poweroff=$power_flag
+    linux $grub_kernel archisobasedir=arch archiso_http_srv=$iso_mirror $boot_network cms_verify=y script=$script_url archi_mode=install archi_payload_sha256=$payload_sha archi_disk_b64=$disk_b64 archi_hostname_b64=$hostname_b64 archi_timezone_b64=$timezone_b64 archi_dns_b64=$dns_b64 archi_key_b64=$key_b64 archi_package_mirror_b64=$package_mirror_b64 archi_extra_packages_b64=$extra_packages_b64 archi_kernel_b64=$kernel_b64 archi_boot_mode=$boot_mode archi_swap_mib=$swap_mib archi_hold=$hold_flag archi_poweroff=$power_flag
     initrd $grub_initramfs
 }
 EOF
