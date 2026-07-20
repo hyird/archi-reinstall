@@ -1120,7 +1120,7 @@ EOF
     log "Installing packages: ${packages[*]}"
     local pacstrap_ok=false
     for _ in 1 2 3; do
-        if pacstrap -K -c /mnt "${packages[@]}"; then
+        if pacstrap -K -c /mnt "${packages[@]}" < <(yes); then
             pacstrap_ok=true
             break
         fi
