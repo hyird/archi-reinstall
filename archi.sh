@@ -44,64 +44,37 @@ die() {
 usage() {
     cat <<'EOF'
 Usage:
-  archi.sh [stage options]
-  archi.sh --cleanup [--install-dir DIR]
+  archi.sh [options]
+  archi.sh --cleanup
 
-Stage options:
-  --cloudflare                 Use Cloudflare DNS/NTP with official mirrors.
-  --aliyun                    Use Aliyun Arch mirrors, AliDNS and China NTP.
-  --ustc, --china             Use USTC Arch mirrors, DNSPod and China NTP.
-  --tuna                      Use TUNA Arch mirrors, DNSPod and China NTP.
-  --alpine-mirror URL          Alpine mirror root containing latest-stable.
-  --iso-mirror URL             Deprecated alias for --alpine-mirror.
-  --package-mirror URL         Pacman mirror containing $repo/os/$arch.
+Options:
   --authorized-key "KEY"       Use a literal root SSH public key.
   --authorized-key-file FILE   File containing the root SSH public key.
-  --authorized-keys-url URL    Download the root SSH public key before staging.
+  --authorized-keys-url URL    Download root SSH public keys from URL.
   --disk DEVICE                Whole target disk, for example /dev/vda.
   --hostname NAME              Installed hostname (default: arch).
   --timezone ZONE              Installed timezone (default: Asia/Shanghai).
-  --interface DEVICE           Source interface (default: current default route).
   --ip ADDRESS/CIDR            Override the inherited static IPv4 address.
-  --netmask MASK               Netmask used when --ip has no CIDR prefix.
   --gateway ADDRESS            Override the inherited IPv4 gateway.
-  --static-ipv4                Explicitly request the default inherit-current mode.
-  --dns "ADDR ..."             DNS servers written to systemd-networkd config.
-  --ntp HOST                  NTP server (default: time.cloudflare.com).
-  --ssh-port PORT             SSH port in Alpine and installed Arch (default: 22).
-  --bbr                       Enable fq + TCP BBR in the installed system.
-  --fail2ban                  Install an nftables-backed SSH jail (off by default).
-  --firmware                  Install linux-firmware (off by default for cloud VMs).
-  --cloud-kernel              Re-apply the default cloud kernel/profile.
-  --ethx                      Use eth0-style interface names.
-  --network-console           Compatibility alias; Alpine SSH is always enabled.
+  --dns "ADDR ..."             Override inherited DNS servers.
+  --ssh-port PORT              SSH port (default: 22).
   --kernel PACKAGE             linux or linux-lts (default: linux-lts).
-  --extra-packages "PKG ..."   Extra official repository packages.
-  --install "PKG ..."          Alias for --extra-packages.
+  --firmware                   Install linux-firmware.
+  --install "PKG ..."          Install extra official packages.
+  --ethx                       Use eth0-style interface names.
+  --bbr                        Enable TCP BBR.
+  --fail2ban                   Enable an SSH jail.
   --swap-mib N                 Swap file size in MiB (default: 0, disabled).
-  --boot-mode MODE             auto, bios, or efi (default: auto).
-  --bios, --efi                Boot-mode aliases.
-  --grub-timeout N            GRUB menu timeout after installation (default: 5).
-  --install-dir DIR            Staging directory under /boot.
+  --tuna, --ustc, --aliyun     Use a regional mirror preset.
   --hold                       Boot Alpine, enable key-only SSH, but do not wipe.
-                               Continue there with:
-                               ARCHI_FORCE_INSTALL=1 /root/archi.sh
   --power-off                  Power off instead of reboot after installation.
-  --reboot                     Compatibility option; reboot is already the default.
-  --yes                        Compatibility option; destructive run is already confirmed.
   --no-reboot                  Stage GRUB but wait for a manual reboot.
-  --force-low-memory           Allow staging with less than 384 MiB RAM.
   --dry-run                    Validate and print the plan without changing files.
   --cleanup                    Remove the staged GRUB entry and downloaded files.
   --help                       Show this help.
   --version                    Show script version.
 
-The target must be x86_64, use GRUB 2, and have wired IPv4 connectivity.
-512 MiB RAM is recommended for the Alpine installer. Defaults are
-cloud-first: hostname arch, linux-lts, QEMU guest agent,
-key-only root SSH, static-network inheritance, and no large firmware bundle. The official
-Alpine kernel/initramfs, modloop and APK repositories are used directly; the
-final operating system is installed with pacstrap from the selected Arch mirror.
+Requires x86_64, GRUB 2, wired IPv4 and root access. The target disk is erased.
 EOF
 }
 
@@ -243,33 +216,6 @@ prefix_to_netmask() {
         result+="${result:+.}$value"
     done
     printf '%s\n' "$result"
-}
-
-netmask_to_prefix() {
-    local netmask=$1 octet prefix=0 partial=false bits
-    local -a octets
-    is_ipv4 "$netmask" || die "Invalid IPv4 netmask: $netmask"
-    IFS=. read -r -a octets <<< "$netmask"
-    for octet in "${octets[@]}"; do
-        case $octet in
-            255) bits=8 ;;
-            254) bits=7 ;;
-            252) bits=6 ;;
-            248) bits=5 ;;
-            240) bits=4 ;;
-            224) bits=3 ;;
-            192) bits=2 ;;
-            128) bits=1 ;;
-            0) bits=0 ;;
-            *) die "Non-contiguous IPv4 netmask: $netmask" ;;
-        esac
-        if [[ $partial == true && $bits != 0 ]]; then
-            die "Non-contiguous IPv4 netmask: $netmask"
-        fi
-        (( bits < 8 )) && partial=true
-        prefix=$((prefix + bits))
-    done
-    printf '%s\n' "$prefix"
 }
 
 detect_dns_servers() {
@@ -616,7 +562,6 @@ stage_main() {
     local ntp='time.cloudflare.com'
     local requested_interface='auto'
     local requested_ip=''
-    local requested_netmask=''
     local requested_gateway=''
     local ssh_port=22
     local bbr=false fail2ban=false firmware=false ethx=false
@@ -626,8 +571,8 @@ stage_main() {
     local boot_mode='auto'
     local grub_timeout=5
     local install_dir=$DEFAULT_INSTALL_DIR
-    local hold=false power_off=false reboot_now=true assume_yes=true
-    local force_low_memory=false dry_run=false cleanup=false
+    local hold=false power_off=false reboot_now=true
+    local dry_run=false cleanup=false
     local source_tmp='' authorized_key_tmp=''
 
     if [[ -r /root/.ssh/authorized_keys ]]; then
@@ -638,54 +583,29 @@ stage_main() {
 
     while (($#)); do
         case $1 in
-            --cloudflare) dns='1.1.1.1 1.0.0.1'; ntp='time.cloudflare.com'; shift ;;
             --aliyun) alpine_mirror=$ALIYUN_ALPINE_MIRROR; package_mirror=$ALIYUN_PACKAGE_MIRROR; dns='223.5.5.5 223.6.6.6'; ntp='time.amazonaws.cn'; shift ;;
-            --ustc|--china) alpine_mirror=$USTC_ALPINE_MIRROR; package_mirror=$USTC_PACKAGE_MIRROR; dns='119.29.29.29 223.5.5.5'; ntp='time.amazonaws.cn'; shift ;;
+            --ustc) alpine_mirror=$USTC_ALPINE_MIRROR; package_mirror=$USTC_PACKAGE_MIRROR; dns='119.29.29.29 223.5.5.5'; ntp='time.amazonaws.cn'; shift ;;
             --tuna) alpine_mirror=$TUNA_ALPINE_MIRROR; package_mirror=$TUNA_PACKAGE_MIRROR; dns='119.29.29.29 223.5.5.5'; ntp='time.amazonaws.cn'; shift ;;
-            --alpine-mirror|--iso-mirror) alpine_mirror=${2:?missing value}; shift 2 ;;
-            --package-mirror) package_mirror=${2:?missing value}; shift 2 ;;
-            --authorized-key|--ssh-key) authorized_key_literal=${2:?missing value}; shift 2 ;;
+            --authorized-key) authorized_key_literal=${2:?missing value}; shift 2 ;;
             --authorized-key-file) authorized_key_file=${2:?missing value}; shift 2 ;;
             --authorized-keys-url) authorized_keys_url=${2:?missing value}; shift 2 ;;
             --disk) disk=${2:?missing value}; shift 2 ;;
             --hostname) hostname=${2:?missing value}; shift 2 ;;
             --timezone) timezone=${2:?missing value}; shift 2 ;;
-            --interface) requested_interface=${2:?missing value}; shift 2 ;;
             --ip) requested_ip=${2:?missing value}; shift 2 ;;
-            --netmask) requested_netmask=${2:?missing value}; shift 2 ;;
             --gateway) requested_gateway=${2:?missing value}; shift 2 ;;
-            --static-ipv4) shift ;;
             --dns) dns=${2:?missing value}; shift 2 ;;
-            --ntp) ntp=${2:?missing value}; shift 2 ;;
             --ssh-port) ssh_port=${2:?missing value}; shift 2 ;;
             --bbr) bbr=true; shift ;;
             --fail2ban) fail2ban=true; shift ;;
-            --no-fail2ban) fail2ban=false; shift ;;
             --firmware) firmware=true; shift ;;
-            --no-firmware) firmware=false; shift ;;
-            --cloud-kernel) kernel=linux-lts; firmware=false; shift ;;
             --ethx) ethx=true; shift ;;
-            --network-console) shift ;;
             --kernel) kernel=${2:?missing value}; shift 2 ;;
-            --extra-packages|--install) extra_packages=${2:?missing value}; shift 2 ;;
+            --install) extra_packages=${2:?missing value}; shift 2 ;;
             --swap-mib) swap_mib=${2:?missing value}; shift 2 ;;
-            --boot-mode) boot_mode=${2:?missing value}; shift 2 ;;
-            --bios) boot_mode=bios; shift ;;
-            --efi) boot_mode=efi; shift ;;
-            --grub-timeout) grub_timeout=${2:?missing value}; shift 2 ;;
-            --install-dir) install_dir=${2:?missing value}; shift 2 ;;
             --hold) hold=true; shift ;;
             --power-off) power_off=true; shift ;;
-            --reboot) reboot_now=true; shift ;;
-            --yes) assume_yes=true; shift ;;
             --no-reboot) reboot_now=false; shift ;;
-            --force-low-memory) force_low_memory=true; shift ;;
-            --force-lowmem)
-                [[ ${2:-} == 0 || ${2:-} == 1 || ${2:-} == 2 ]] ||
-                    die '--force-lowmem must be 0, 1, or 2'
-                [[ $2 != 0 ]] && force_low_memory=true
-                shift 2
-                ;;
             --dry-run) dry_run=true; shift ;;
             --cleanup) cleanup=true; shift ;;
             --version) printf '%s\n' "$ARCHI_VERSION"; return 0 ;;
@@ -754,8 +674,8 @@ stage_main() {
 
     local mem_kib
     mem_kib=$(awk '/^MemTotal:/ {print $2}' /proc/meminfo)
-    if (( mem_kib < 384000 )) && [[ $force_low_memory != true ]]; then
-        die "Only $((mem_kib / 1024)) MiB RAM detected; the Alpine installer needs about 384 MiB. Use --force-low-memory to override"
+    if (( mem_kib < 384000 )); then
+        die "Only $((mem_kib / 1024)) MiB RAM detected; the Alpine installer needs about 384 MiB"
     elif (( mem_kib < 524288 )); then
         warn "Only $((mem_kib / 1024)) MiB RAM detected; the Alpine installer may run out of memory"
     fi
@@ -786,20 +706,13 @@ stage_main() {
         { for (i = 1; i <= NF; i++) if ($i == "via") { print $(i + 1); exit } }
     ')
     if [[ -n $requested_ip ]]; then
-        if [[ $requested_ip == */* ]]; then
-            local requested_address=${requested_ip%/*} requested_prefix=${requested_ip#*/}
-            is_ipv4 "$requested_address" || die "Invalid static IPv4 address: $requested_address"
-            if ! [[ $requested_prefix =~ ^[0-9]+$ ]] || ! (( 10#$requested_prefix <= 32 )); then
-                die "Invalid IPv4 prefix: $requested_prefix"
-            fi
-            boot_cidr=$requested_ip
-        else
-            is_ipv4 "$requested_ip" || die "Invalid static IPv4 address: $requested_ip"
-            [[ -n $requested_netmask ]] || die '--ip without CIDR requires --netmask'
-            boot_cidr="$requested_ip/$(netmask_to_prefix "$requested_netmask")"
+        [[ $requested_ip == */* ]] || die '--ip requires ADDRESS/CIDR'
+        local requested_address=${requested_ip%/*} requested_prefix=${requested_ip#*/}
+        is_ipv4 "$requested_address" || die "Invalid static IPv4 address: $requested_address"
+        if ! [[ $requested_prefix =~ ^[0-9]+$ ]] || ! (( 10#$requested_prefix <= 32 )); then
+            die "Invalid IPv4 prefix: $requested_prefix"
         fi
-    elif [[ -n $requested_netmask ]]; then
-        die '--netmask requires --ip'
+        boot_cidr=$requested_ip
     fi
     if [[ -n $requested_gateway ]]; then
         is_ipv4 "$requested_gateway" || die "Invalid IPv4 gateway: $requested_gateway"
@@ -971,9 +884,8 @@ EOF
 
     sync
     log 'Arch reinstall entry is staged successfully'
-    log "It remains reversible until reboot: archi.sh --cleanup --install-dir $install_dir"
+    log 'It remains reversible until reboot: archi.sh --cleanup'
     if [[ $reboot_now == true ]]; then
-        [[ $assume_yes == true ]] || die '--reboot requires --yes because the next boot erases the target disk'
         log 'Rebooting into Alpine; the selected disk will be erased'
         systemctl reboot
     else
