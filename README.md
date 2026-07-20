@@ -9,35 +9,28 @@
 
 ## 快速开始
 
-赋予脚本执行权限：
+下载脚本：
 
 ```bash
-chmod +x archi.sh
+curl -fLO https://raw.githubusercontent.com/hyird/archi-reinstall/main/archi.sh && chmod +x archi.sh
 ```
 
 先检查安装计划，不修改系统：
 
 ```bash
-sudo ./archi.sh \
-  --dry-run \
-  --authorized-key-file /root/.ssh/authorized_keys \
-  --disk /dev/vda
+sudo ./archi.sh --dry-run --authorized-key-file /root/.ssh/authorized_keys --disk /dev/vda
 ```
 
 确认无误后开始重装。脚本完成 staging 后会立即重启：
 
 ```bash
-sudo ./archi.sh \
-  --authorized-key-file /root/.ssh/authorized_keys \
-  --disk /dev/vda
+sudo ./archi.sh --authorized-key-file /root/.ssh/authorized_keys --disk /dev/vda
 ```
 
 也可以直接传入公钥或从 URL 下载：
 
 ```bash
-sudo ./archi.sh \
-  --authorized-keys-url https://github.com/USERNAME.keys \
-  --disk /dev/vda
+sudo ./archi.sh --authorized-keys-url https://github.com/USERNAME.keys --disk /dev/vda
 ```
 
 如果 staging 完成后不想立即重启，添加 `--no-reboot`，准备好后再手动执行 `reboot`。
@@ -47,7 +40,7 @@ sudo ./archi.sh \
 | 项目 | 默认值 |
 |---|---|
 | 主机名 | `arch` |
-| 时区 | `UTC` |
+| 时区 | `Asia/Shanghai` |
 | 内核 | `linux-lts` |
 | 文件系统 | GPT + ext4 |
 | 网络 | 继承当前 IPv4、网关、DNS 和 MAC；信息不完整时使用 DHCP |
@@ -88,11 +81,7 @@ sudo ./archi.sh \
 示例：
 
 ```bash
-sudo ./archi.sh \
-  --tuna \
-  --timezone Asia/Shanghai \
-  --authorized-key-file /root/.ssh/authorized_keys \
-  --disk /dev/vda
+sudo ./archi.sh --tuna --authorized-key-file /root/.ssh/authorized_keys --disk /dev/vda
 ```
 
 也可以分别使用 `--alpine-mirror URL` 和 `--package-mirror URL` 指定镜像。Arch 镜像地址需要包含字面量 `$repo/os/$arch`。
@@ -104,7 +93,7 @@ sudo ./archi.sh \
 | 选项 | 默认值 | 说明 |
 |---|---|---|
 | `--hostname NAME` | `arch` | 最终系统主机名 |
-| `--timezone ZONE` | `UTC` | 最终系统时区 |
+| `--timezone ZONE` | `Asia/Shanghai` | 最终系统时区 |
 | `--authorized-key "KEY"` | — | 直接传入 root SSH 公钥 |
 | `--authorized-key-file FILE` | 自动检查当前用户 | 从文件读取 root SSH 公钥 |
 | `--authorized-keys-url URL` | — | staging 时下载 root SSH 公钥 |
@@ -165,34 +154,19 @@ sudo ./archi.sh \
 安装主线内核、firmware 和额外软件包：
 
 ```bash
-sudo ./archi.sh \
-  --kernel linux \
-  --firmware \
-  --install "git htop tmux" \
-  --authorized-key-file /root/.ssh/authorized_keys \
-  --disk /dev/nvme0n1
+sudo ./archi.sh --kernel linux --firmware --install "git htop tmux" --authorized-key-file /root/.ssh/authorized_keys --disk /dev/nvme0n1
 ```
 
 手动指定静态网络：
 
 ```bash
-sudo ./archi.sh \
-  --ip 192.0.2.10/24 \
-  --gateway 192.0.2.1 \
-  --dns "1.1.1.1 1.0.0.1" \
-  --authorized-key-file /root/.ssh/authorized_keys \
-  --disk /dev/vda
+sudo ./archi.sh --ip 192.0.2.10/24 --gateway 192.0.2.1 --dns "1.1.1.1 1.0.0.1" --authorized-key-file /root/.ssh/authorized_keys --disk /dev/vda
 ```
 
 启用 BBR、Fail2ban，并修改 SSH 端口：
 
 ```bash
-sudo ./archi.sh \
-  --bbr \
-  --fail2ban \
-  --ssh-port 2222 \
-  --authorized-key-file /root/.ssh/authorized_keys \
-  --disk /dev/vda
+sudo ./archi.sh --bbr --fail2ban --ssh-port 2222 --authorized-key-file /root/.ssh/authorized_keys --disk /dev/vda
 ```
 
 ## 查看安装进度

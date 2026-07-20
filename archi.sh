@@ -58,7 +58,7 @@ Stage options:
   --authorized-keys-url URL    Download the root SSH public key before staging.
   --disk DEVICE                Whole target disk, for example /dev/vda.
   --hostname NAME              Installed hostname (default: arch).
-  --timezone ZONE              Installed timezone (default: UTC).
+  --timezone ZONE              Installed timezone (default: Asia/Shanghai).
   --interface DEVICE           Source interface (default: current default route).
   --ip ADDRESS/CIDR            Override the inherited static IPv4 address.
   --netmask MASK               Netmask used when --ip has no CIDR prefix.
@@ -76,10 +76,10 @@ Stage options:
   --network-console           Compatibility alias; Alpine SSH is always enabled.
   --kernel PACKAGE             linux or linux-lts (default: linux-lts).
   --extra-packages "PKG ..."   Extra official repository packages.
-  --install "PKG ..."          debi-compatible alias for --extra-packages.
+  --install "PKG ..."          Alias for --extra-packages.
   --swap-mib N                 Swap file size in MiB (default: 0, disabled).
   --boot-mode MODE             auto, bios, or efi (default: auto).
-  --bios, --efi                debi-compatible boot-mode aliases.
+  --bios, --efi                Boot-mode aliases.
   --grub-timeout N            GRUB menu timeout after installation (default: 5).
   --install-dir DIR            Staging directory under /boot.
   --hold                       Boot Alpine, enable key-only SSH, but do not wipe.
@@ -610,7 +610,7 @@ stage_main() {
     local authorized_keys_url=''
     local disk=''
     local hostname='arch'
-    local timezone='UTC'
+    local timezone='Asia/Shanghai'
     local dns=''
     local ntp='time.cloudflare.com'
     local requested_interface='auto'
