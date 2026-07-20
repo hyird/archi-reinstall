@@ -13,6 +13,8 @@ umask 077
 
 readonly ARCHI_PAYLOAD_ID='archi-network-reinstall-v1'
 readonly ARCHI_VERSION='0.8.0'
+readonly ARCHI_RAW_URL='https://raw.githubusercontent.com/hyird/archi-reinstall/main/archi.sh'
+ARCHI_SOURCE_FILE=${BASH_SOURCE[0]}
 readonly DEFAULT_ALPINE_MIRROR='https://dl-cdn.alpinelinux.org/alpine'
 # The pacman placeholders must remain literal until the installer writes mirrorlist.
 readonly DEFAULT_PACKAGE_MIRROR="https://geo.mirror.pkgbuild.com/\$repo/os/\$arch"
@@ -419,7 +421,7 @@ PerSourceMaxStartups 3
 X11Forwarding no
 EOF
     printf '%s\n' "$authorized_key" > "$apkovl/root/.ssh/authorized_keys"
-    cp -f -- "${BASH_SOURCE[0]}" "$apkovl/root/archi.sh"
+    cp -f -- "$ARCHI_SOURCE_FILE" "$apkovl/root/archi.sh"
     cat > "$apkovl/root/archi-init" <<'EOF'
 #!/bin/sh
 set +e
@@ -627,6 +629,7 @@ stage_main() {
     local install_dir=$DEFAULT_INSTALL_DIR
     local hold=false power_off=false reboot_now=true assume_yes=true
     local force_low_memory=false dry_run=false cleanup=false
+    local source_tmp='' authorized_key_tmp=''
 
     if [[ -r /root/.ssh/authorized_keys ]]; then
         authorized_key_file=/root/.ssh/authorized_keys
@@ -713,11 +716,15 @@ stage_main() {
     package_mirror=$(trim_trailing_slash "$package_mirror")
     validate_url '--alpine-mirror' "$alpine_mirror"
     validate_url '--package-mirror' "$package_mirror"
-    local authorized_key_tmp=''
+    if [[ $ARCHI_SOURCE_FILE == /dev/fd/* || $ARCHI_SOURCE_FILE == /proc/self/fd/* ]]; then
+        source_tmp=$(mktemp)
+        download_file "$ARCHI_RAW_URL" "$source_tmp" 10000
+        ARCHI_SOURCE_FILE=$source_tmp
+    fi
+    trap 'rm -f -- "${authorized_key_tmp:-}" "${source_tmp:-}"' EXIT
     if [[ -z $authorized_key_literal && -n $authorized_keys_url ]]; then
         validate_url '--authorized-keys-url' "$authorized_keys_url"
         authorized_key_tmp=$(mktemp)
-        trap 'rm -f -- "${authorized_key_tmp:-}"' EXIT
         download_file "$authorized_keys_url" "$authorized_key_tmp" 40
         authorized_key_file=$authorized_key_tmp
     fi
@@ -807,7 +814,7 @@ stage_main() {
         "$boot_cidr" "$boot_gateway")
 
     local payload_sha
-    payload_sha=$(sha256sum "${BASH_SOURCE[0]}" | awk '{print $1}')
+    payload_sha=$(sha256sum "$ARCHI_SOURCE_FILE" | awk '{print $1}')
 
     local netboot_url kernel_url initramfs_url modloop_url apk_main_url apk_community_url core_url extra_url
     netboot_url="$alpine_mirror/latest-stable/releases/x86_64/netboot"
@@ -966,7 +973,7 @@ EOF
 
     sync
     log 'Arch reinstall entry is staged successfully'
-    log "It remains reversible until reboot: ${BASH_SOURCE[0]} --cleanup --install-dir $install_dir"
+    log "It remains reversible until reboot: archi.sh --cleanup --install-dir $install_dir"
     if [[ $reboot_now == true ]]; then
         [[ $assume_yes == true ]] || die '--reboot requires --yes because the next boot erases the target disk'
         log 'Rebooting into Alpine; the selected disk will be erased'

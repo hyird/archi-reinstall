@@ -9,31 +9,11 @@
 
 ## 快速开始
 
-下载脚本：
+以 root 用户执行：
 
 ```bash
-curl -fLO https://raw.githubusercontent.com/hyird/archi-reinstall/main/archi.sh && chmod +x archi.sh
+bash <(curl -fsSL https://raw.githubusercontent.com/hyird/archi-reinstall/main/archi.sh)
 ```
-
-先检查安装计划，不修改系统：
-
-```bash
-./archi.sh --dry-run --authorized-key-file /root/.ssh/authorized_keys --disk /dev/vda
-```
-
-确认无误后开始重装。脚本完成 staging 后会立即重启：
-
-```bash
-./archi.sh --authorized-key-file /root/.ssh/authorized_keys --disk /dev/vda
-```
-
-也可以直接传入公钥或从 URL 下载：
-
-```bash
-./archi.sh --authorized-keys-url https://github.com/USERNAME.keys --disk /dev/vda
-```
-
-如果 staging 完成后不想立即重启，添加 `--no-reboot`，准备好后再手动执行 `reboot`。
 
 ## 默认配置
 
