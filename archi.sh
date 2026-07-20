@@ -24,6 +24,8 @@ readonly USTC_ALPINE_MIRROR='https://mirrors.ustc.edu.cn/alpine'
 readonly USTC_PACKAGE_MIRROR="https://mirrors.ustc.edu.cn/archlinux/\$repo/os/\$arch"
 readonly ALIYUN_ALPINE_MIRROR='https://mirrors.aliyun.com/alpine'
 readonly ALIYUN_PACKAGE_MIRROR="https://mirrors.aliyun.com/archlinux/\$repo/os/\$arch"
+readonly TENCENT_ALPINE_MIRROR='https://mirrors.cloud.tencent.com/alpine'
+readonly TENCENT_PACKAGE_MIRROR="https://mirrors.cloud.tencent.com/archlinux/\$repo/os/\$arch"
 readonly DEFAULT_INSTALL_DIR='/boot/archi-reinstall'
 readonly GRUB_ENTRY_FILE='/etc/grub.d/42_archi_reinstall'
 readonly GRUB_DEFAULT_FILE='/etc/default/grub.d/zz-archi-reinstall.cfg'
@@ -48,24 +50,21 @@ Usage:
   archi.sh --cleanup
 
 Options:
-  --authorized-key "KEY"       Use a literal root SSH public key.
-  --authorized-key-file FILE   File containing the root SSH public key.
-  --authorized-keys-url URL    Download root SSH public keys from URL.
+  --authorized-key VALUE       Root SSH public key, file path, or URL.
   --disk DEVICE                Whole target disk, for example /dev/vda.
   --hostname NAME              Installed hostname (default: arch).
   --timezone ZONE              Installed timezone (default: Asia/Shanghai).
   --ip ADDRESS/CIDR            Override the inherited static IPv4 address.
   --gateway ADDRESS            Override the inherited IPv4 gateway.
-  --dns "ADDR ..."             Override inherited DNS servers.
+  --dns "ADDR ..."             DNS servers (default: 1.1.1.1).
   --ssh-port PORT              SSH port (default: 22).
-  --kernel PACKAGE             linux or linux-lts (default: linux-lts).
-  --firmware                   Install linux-firmware.
   --install "PKG ..."          Install extra official packages.
   --ethx                       Use eth0-style interface names.
   --bbr                        Enable TCP BBR.
   --fail2ban                   Enable an SSH jail.
   --swap-mib N                 Swap file size in MiB (default: 0, disabled).
   --tuna, --ustc, --aliyun     Use a regional mirror preset.
+  --tencent                    Use the Tencent Cloud mirror preset.
   --hold                       Boot Alpine, enable key-only SSH, but do not wipe.
   --power-off                  Power off instead of reboot after installation.
   --no-reboot                  Stage GRUB but wait for a manual reboot.
@@ -552,13 +551,12 @@ cleanup_stage() {
 stage_main() {
     local alpine_mirror=$DEFAULT_ALPINE_MIRROR
     local package_mirror=$DEFAULT_PACKAGE_MIRROR
-    local authorized_key_literal=''
+    local authorized_key_input='' authorized_key_literal=''
     local authorized_key_file=''
-    local authorized_keys_url=''
     local disk=''
     local hostname='arch'
     local timezone='Asia/Shanghai'
-    local dns=''
+    local dns='1.1.1.1'
     local ntp='time.cloudflare.com'
     local requested_interface='auto'
     local requested_ip=''
@@ -586,9 +584,8 @@ stage_main() {
             --aliyun) alpine_mirror=$ALIYUN_ALPINE_MIRROR; package_mirror=$ALIYUN_PACKAGE_MIRROR; dns='223.5.5.5 223.6.6.6'; ntp='time.amazonaws.cn'; shift ;;
             --ustc) alpine_mirror=$USTC_ALPINE_MIRROR; package_mirror=$USTC_PACKAGE_MIRROR; dns='119.29.29.29 223.5.5.5'; ntp='time.amazonaws.cn'; shift ;;
             --tuna) alpine_mirror=$TUNA_ALPINE_MIRROR; package_mirror=$TUNA_PACKAGE_MIRROR; dns='119.29.29.29 223.5.5.5'; ntp='time.amazonaws.cn'; shift ;;
-            --authorized-key) authorized_key_literal=${2:?missing value}; shift 2 ;;
-            --authorized-key-file) authorized_key_file=${2:?missing value}; shift 2 ;;
-            --authorized-keys-url) authorized_keys_url=${2:?missing value}; shift 2 ;;
+            --tencent) alpine_mirror=$TENCENT_ALPINE_MIRROR; package_mirror=$TENCENT_PACKAGE_MIRROR; dns='119.29.29.29'; ntp='time.amazonaws.cn'; shift ;;
+            --authorized-key) authorized_key_input=${2:?missing value}; shift 2 ;;
             --disk) disk=${2:?missing value}; shift 2 ;;
             --hostname) hostname=${2:?missing value}; shift 2 ;;
             --timezone) timezone=${2:?missing value}; shift 2 ;;
@@ -598,9 +595,7 @@ stage_main() {
             --ssh-port) ssh_port=${2:?missing value}; shift 2 ;;
             --bbr) bbr=true; shift ;;
             --fail2ban) fail2ban=true; shift ;;
-            --firmware) firmware=true; shift ;;
             --ethx) ethx=true; shift ;;
-            --kernel) kernel=${2:?missing value}; shift 2 ;;
             --install) extra_packages=${2:?missing value}; shift 2 ;;
             --swap-mib) swap_mib=${2:?missing value}; shift 2 ;;
             --hold) hold=true; shift ;;
@@ -640,21 +635,26 @@ stage_main() {
         ARCHI_SOURCE_FILE=$source_tmp
     fi
     trap 'rm -f -- "${authorized_key_tmp:-}" "${source_tmp:-}"' EXIT
-    if [[ -z $authorized_key_literal && -n $authorized_keys_url ]]; then
-        validate_url '--authorized-keys-url' "$authorized_keys_url"
-        authorized_key_tmp=$(mktemp)
-        download_file "$authorized_keys_url" "$authorized_key_tmp" 40
-        authorized_key_file=$authorized_key_tmp
+    if [[ -n $authorized_key_input ]]; then
+        if [[ $authorized_key_input =~ ^https?:// ]]; then
+            validate_url '--authorized-key' "$authorized_key_input"
+            authorized_key_tmp=$(mktemp)
+            download_file "$authorized_key_input" "$authorized_key_tmp" 40
+            authorized_key_file=$authorized_key_tmp
+        elif [[ -r $authorized_key_input ]]; then
+            authorized_key_file=$authorized_key_input
+        else
+            authorized_key_literal=$authorized_key_input
+        fi
     fi
     [[ -n $authorized_key_literal || -n $authorized_key_file ]] ||
-        die 'Provide --authorized-key, --authorized-key-file, or --authorized-keys-url'
+        die 'Provide --authorized-key as a public key, file path, or URL'
     validate_hostname "$hostname"
     validate_packages "$extra_packages"
     validate_port "$ssh_port"
     [[ $ntp =~ ^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?$ ]] || die "Invalid NTP host: $ntp"
     [[ $requested_interface == auto || $requested_interface =~ ^[A-Za-z0-9_.:-]+$ ]] ||
         die "Invalid interface name: $requested_interface"
-    [[ $kernel == linux || $kernel == linux-lts ]] || die '--kernel must be linux or linux-lts'
     [[ $swap_mib =~ ^[0-9]+$ ]] || die '--swap-mib must be a non-negative integer'
     [[ $grub_timeout =~ ^[0-9]+$ && $grub_timeout -le 60 ]] ||
         die '--grub-timeout must be an integer from 0 to 60'
