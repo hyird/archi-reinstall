@@ -24,7 +24,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/hyird/archi-reinstall/main/a
 | 内核 | `linux-lts` |
 | 文件系统 | GPT + ext4 |
 | 网络 | 继承当前 IPv4、网关、DNS 和 MAC；信息不完整时使用 DHCP |
-| 网卡命名 | `eth0` 风格 |
+| 网卡命名 | 系统默认 |
 | SSH | root 公钥登录，端口 `22`，禁用密码登录 |
 | Swap | 不创建 |
 | Firmware | 不安装 `linux-firmware` |
@@ -93,8 +93,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/hyird/archi-reinstall/main/a
 | `--gateway ADDRESS` | 继承当前配置 | 指定 IPv4 网关 |
 | `--dns "ADDR ..."` | 自动探测 | 指定 DNS 服务器 |
 | `--ntp HOST` | `time.cloudflare.com` | 指定 NTP 服务器 |
-| `--ethx` | 开启 | 使用 `eth0` 风格网卡名 |
-| `--predictable-names` | 关闭 | 保留 systemd 可预测网卡名 |
+| `--ethx` | 关闭 | 使用 `eth0` 风格网卡名 |
 
 ### 磁盘与启动
 

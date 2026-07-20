@@ -73,8 +73,7 @@ Stage options:
   --fail2ban                  Install an nftables-backed SSH jail (off by default).
   --firmware                  Install linux-firmware (off by default for cloud VMs).
   --cloud-kernel              Re-apply the default cloud kernel/profile.
-  --ethx                      Use eth0-style names (default, official udev method).
-  --predictable-names         Keep systemd predictable interface names.
+  --ethx                      Use eth0-style interface names.
   --network-console           Compatibility alias; Alpine SSH is always enabled.
   --kernel PACKAGE             linux or linux-lts (default: linux-lts).
   --extra-packages "PKG ..."   Extra official repository packages.
@@ -99,7 +98,7 @@ Stage options:
 
 The target must be x86_64, use GRUB 2, and have wired IPv4 connectivity.
 512 MiB RAM is recommended for the Alpine installer. Defaults are
-cloud-first: hostname arch, linux-lts, eth0-style naming, QEMU guest agent,
+cloud-first: hostname arch, linux-lts, QEMU guest agent,
 key-only root SSH, static-network inheritance, and no large firmware bundle. The official
 Alpine kernel/initramfs, modloop and APK repositories are used directly; the
 final operating system is installed with pacstrap from the selected Arch mirror.
@@ -620,7 +619,7 @@ stage_main() {
     local requested_netmask=''
     local requested_gateway=''
     local ssh_port=22
-    local bbr=false fail2ban=false firmware=false ethx=true
+    local bbr=false fail2ban=false firmware=false ethx=false
     local kernel='linux-lts'
     local extra_packages=''
     local swap_mib=0
@@ -666,7 +665,6 @@ stage_main() {
             --no-firmware) firmware=false; shift ;;
             --cloud-kernel) kernel=linux-lts; firmware=false; shift ;;
             --ethx) ethx=true; shift ;;
-            --predictable-names|--no-ethx) ethx=false; shift ;;
             --network-console) shift ;;
             --kernel) kernel=${2:?missing value}; shift 2 ;;
             --extra-packages|--install) extra_packages=${2:?missing value}; shift 2 ;;
