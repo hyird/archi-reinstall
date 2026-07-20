@@ -15,38 +15,27 @@ bash <(curl -fsSL https://raw.githubusercontent.com/hyird/archi-reinstall/main/a
 
 脚本默认读取 `/root/.ssh/authorized_keys`、自动探测系统盘和当前网络，完成准备后立即重启安装。
 
-## 默认配置
-
-- 主机名 `arch`，时区 `Asia/Shanghai`
-- `linux-lts` 内核，不安装 `linux-firmware`，使用 ext4，不创建 swap
-- 继承当前 IPv4、网关和 MAC，DNS 默认为 `1.1.1.1`，网络信息不完整时使用 DHCP
-- root 仅允许 SSH 公钥登录，端口 `22`
-- 使用系统默认网卡命名
-- 安装并启用 QEMU Guest Agent
-- 安装成功后自动重启
-
 ## 常用选项
 
 | 选项 | 说明 |
 |---|---|
-| `--disk DEVICE` | 指定要清空的整块磁盘 |
-| `--authorized-key VALUE` | 使用公钥文本、文件路径或 URL |
-| `--hostname NAME` | 设置主机名 |
-| `--timezone ZONE` | 设置时区 |
-| `--ip ADDRESS/CIDR` | 设置静态 IPv4 地址 |
-| `--gateway ADDRESS` | 设置 IPv4 网关 |
-| `--dns "ADDR ..."` | 设置 DNS 服务器，默认 `1.1.1.1` |
-| `--ssh-port PORT` | 设置 SSH 端口 |
+| `--disk /dev/vda` | 指定要清空的整块磁盘 |
+| `--authorized-key /root/.ssh/authorized_keys` | 使用公钥文本、文件路径或 URL |
+| `--hostname arch` | 设置主机名 |
+| `--timezone Asia/Shanghai` | 设置时区 |
+| `--ip 192.0.2.10/24` | 设置静态 IPv4 地址 |
+| `--gateway 192.0.2.1` | 设置 IPv4 网关 |
+| `--dns 1.1.1.1` | 设置 DNS 服务器，默认 `1.1.1.1` |
+| `--ssh-port 22` | 设置 SSH 端口 |
 | `--ethx` | 使用 `eth0` 风格网卡名 |
-| `--install "PKG ..."` | 安装额外官方仓库软件包 |
+| `--install "git htop"` | 安装额外官方仓库软件包 |
 | `--bbr` | 启用 BBR 和高并发网络参数 |
 | `--fail2ban` | 启用 SSH 防护 |
-| `--swap-mib N` | 创建 N MiB swap 文件 |
+| `--swap-mib 1024` | 创建 1024 MiB swap 文件 |
+| `--mirror https://mirrors.cloud.tencent.com/archlinux` | 设置 Arch 镜像根地址，仓库路径由脚本自动补全 |
 | `--tuna` / `--ustc` / `--aliyun` / `--tencent` | 使用中国大陆镜像和网络服务 |
 | `--dry-run` | 只检查并显示安装计划 |
-| `--no-reboot` | 准备完成后不立即重启 |
 | `--hold` | 进入 Alpine 后等待手动确认，不擦盘 |
-| `--power-off` | 安装成功后关机 |
 
 查看脚本帮助：
 
@@ -62,10 +51,16 @@ bash <(curl -fsSL https://raw.githubusercontent.com/hyird/archi-reinstall/main/a
 bash <(curl -fsSL https://raw.githubusercontent.com/hyird/archi-reinstall/main/archi.sh) --disk /dev/vda --authorized-key https://github.com/hyird.keys
 ```
 
-使用 TUNA 镜像并启用 BBR：
+使用腾讯云镜像并启用 BBR：
 
 ```bash
 bash <(curl -fsSL https://raw.githubusercontent.com/hyird/archi-reinstall/main/archi.sh) --tencent --dns 1.1.1.1 --bbr
+```
+
+手动设置 Arch 镜像：
+
+```bash
+bash <(curl -fsSL https://raw.githubusercontent.com/hyird/archi-reinstall/main/archi.sh) --mirror https://mirrors.cloud.tencent.com/archlinux
 ```
 
 只检查配置：

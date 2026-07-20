@@ -50,24 +50,25 @@ Usage:
   archi.sh --cleanup
 
 Options:
-  --authorized-key VALUE       Root SSH public key, file path, or URL.
-  --disk DEVICE                Whole target disk, for example /dev/vda.
-  --hostname NAME              Installed hostname (default: arch).
-  --timezone ZONE              Installed timezone (default: Asia/Shanghai).
-  --ip ADDRESS/CIDR            Override the inherited static IPv4 address.
-  --gateway ADDRESS            Override the inherited IPv4 gateway.
-  --dns "ADDR ..."             DNS servers (default: 1.1.1.1).
-  --ssh-port PORT              SSH port (default: 22).
-  --install "PKG ..."          Install extra official packages.
+  --authorized-key /root/.ssh/authorized_keys
+                               Root SSH public key, file path, or URL.
+  --disk /dev/vda              Whole target disk.
+  --hostname arch              Installed hostname (default: arch).
+  --timezone Asia/Shanghai     Installed timezone (default: Asia/Shanghai).
+  --ip 192.0.2.10/24           Override the inherited static IPv4 address.
+  --gateway 192.0.2.1          Override the inherited IPv4 gateway.
+  --dns 1.1.1.1                DNS servers (default: 1.1.1.1).
+  --ssh-port 22                SSH port (default: 22).
+  --install "git htop"         Install extra official packages.
   --ethx                       Use eth0-style interface names.
   --bbr                        Enable TCP BBR.
   --fail2ban                   Enable an SSH jail.
-  --swap-mib N                 Swap file size in MiB (default: 0, disabled).
+  --swap-mib 1024              Swap file size in MiB (default: 0, disabled).
+  --mirror https://mirrors.cloud.tencent.com/archlinux
+                               Arch mirror root; repository path is appended.
   --tuna, --ustc, --aliyun     Use a regional mirror preset.
   --tencent                    Use the Tencent Cloud mirror preset.
   --hold                       Boot Alpine, enable key-only SSH, but do not wipe.
-  --power-off                  Power off instead of reboot after installation.
-  --no-reboot                  Stage GRUB but wait for a manual reboot.
   --dry-run                    Validate and print the plan without changing files.
   --cleanup                    Remove the staged GRUB entry and downloaded files.
   --help                       Show this help.
@@ -569,7 +570,7 @@ stage_main() {
     local boot_mode='auto'
     local grub_timeout=5
     local install_dir=$DEFAULT_INSTALL_DIR
-    local hold=false power_off=false reboot_now=true
+    local hold=false
     local dry_run=false cleanup=false
     local source_tmp='' authorized_key_tmp=''
 
@@ -585,6 +586,7 @@ stage_main() {
             --ustc) alpine_mirror=$USTC_ALPINE_MIRROR; package_mirror=$USTC_PACKAGE_MIRROR; dns='119.29.29.29 223.5.5.5'; ntp='time.amazonaws.cn'; shift ;;
             --tuna) alpine_mirror=$TUNA_ALPINE_MIRROR; package_mirror=$TUNA_PACKAGE_MIRROR; dns='119.29.29.29 223.5.5.5'; ntp='time.amazonaws.cn'; shift ;;
             --tencent) alpine_mirror=$TENCENT_ALPINE_MIRROR; package_mirror=$TENCENT_PACKAGE_MIRROR; dns='119.29.29.29'; ntp='time.amazonaws.cn'; shift ;;
+            --mirror) package_mirror="$(trim_trailing_slash "${2:?missing value}")/\$repo/os/\$arch"; shift 2 ;;
             --authorized-key) authorized_key_input=${2:?missing value}; shift 2 ;;
             --disk) disk=${2:?missing value}; shift 2 ;;
             --hostname) hostname=${2:?missing value}; shift 2 ;;
@@ -599,8 +601,6 @@ stage_main() {
             --install) extra_packages=${2:?missing value}; shift 2 ;;
             --swap-mib) swap_mib=${2:?missing value}; shift 2 ;;
             --hold) hold=true; shift ;;
-            --power-off) power_off=true; shift ;;
-            --no-reboot) reboot_now=false; shift ;;
             --dry-run) dry_run=true; shift ;;
             --cleanup) cleanup=true; shift ;;
             --version) printf '%s\n' "$ARCHI_VERSION"; return 0 ;;
@@ -774,7 +774,6 @@ stage_main() {
   GRUB timeout:      ${grub_timeout}s
   extra packages:    ${extra_packages:-none}
   hold before wipe:  $hold
-  reboot after stage: $reboot_now
   stage directory:   $install_dir
 EOF
     if [[ $dry_run == true ]]; then
@@ -816,7 +815,7 @@ EOF
         boot_gateway=''
     fi
 
-    local grub_prefix grub_stage_dir grub_kernel grub_initramfs hold_flag power_flag
+    local grub_prefix grub_stage_dir grub_kernel grub_initramfs hold_flag
     if mountpoint -q /boot; then
         grub_prefix=''
     else
@@ -826,7 +825,6 @@ EOF
     grub_kernel="$grub_prefix$grub_stage_dir/vmlinuz-virt"
     grub_initramfs="$grub_prefix$grub_stage_dir/initramfs-virt"
     hold_flag=0; [[ $hold == true ]] && hold_flag=1
-    power_flag=0; [[ $power_off == true ]] && power_flag=1
 
     cat > "$install_dir/manifest" <<EOF
 ARCHI_PAYLOAD_ID=$ARCHI_PAYLOAD_ID
@@ -862,7 +860,7 @@ menuentry 'Arch Linux network reinstall (ERASES TARGET DISK)' --id archi {
     insmod part_gpt
     insmod part_msdos
     insmod ext2
-    linux $grub_kernel modules=loop,squashfs,sd_mod,usb_storage,virtio_scsi,virtio_blk alpine_repo=$alpine_mirror/latest-stable/main,$alpine_mirror/latest-stable/community apkovl=/archi.apkovl.tar.gz init=/root/archi-init $boot_network archi_mode=install archi_payload_sha256=$payload_sha archi_disk_b64=$disk_b64 archi_hostname_b64=$hostname_b64 archi_timezone_b64=$timezone_b64 archi_dns_b64=$dns_b64 archi_key_b64=$key_b64 archi_package_mirror_b64=$package_mirror_b64 archi_extra_packages_b64=$extra_packages_b64 archi_kernel_b64=$kernel_b64 archi_ntp_b64=$ntp_b64 archi_boot_mode=$boot_mode archi_swap_mib=$swap_mib archi_hold=$hold_flag archi_poweroff=$power_flag archi_boot_cidr=$boot_cidr archi_gateway=$boot_gateway archi_boot_mac=$boot_mac archi_dns_csv=$dns_csv archi_ssh_port=$ssh_port archi_bbr=$bbr archi_fail2ban=$fail2ban archi_firmware=$firmware archi_ethx=$ethx archi_grub_timeout=$grub_timeout
+    linux $grub_kernel modules=loop,squashfs,sd_mod,usb_storage,virtio_scsi,virtio_blk alpine_repo=$alpine_mirror/latest-stable/main,$alpine_mirror/latest-stable/community apkovl=/archi.apkovl.tar.gz init=/root/archi-init $boot_network archi_mode=install archi_payload_sha256=$payload_sha archi_disk_b64=$disk_b64 archi_hostname_b64=$hostname_b64 archi_timezone_b64=$timezone_b64 archi_dns_b64=$dns_b64 archi_key_b64=$key_b64 archi_package_mirror_b64=$package_mirror_b64 archi_extra_packages_b64=$extra_packages_b64 archi_kernel_b64=$kernel_b64 archi_ntp_b64=$ntp_b64 archi_boot_mode=$boot_mode archi_swap_mib=$swap_mib archi_hold=$hold_flag archi_boot_cidr=$boot_cidr archi_gateway=$boot_gateway archi_boot_mac=$boot_mac archi_dns_csv=$dns_csv archi_ssh_port=$ssh_port archi_bbr=$bbr archi_fail2ban=$fail2ban archi_firmware=$firmware archi_ethx=$ethx archi_grub_timeout=$grub_timeout
     initrd $grub_initramfs
 }
 EOF
@@ -885,12 +883,8 @@ EOF
     sync
     log 'Arch reinstall entry is staged successfully'
     log 'It remains reversible until reboot: archi.sh --cleanup'
-    if [[ $reboot_now == true ]]; then
-        log 'Rebooting into Alpine; the selected disk will be erased'
-        systemctl reboot
-    else
-        log 'Run reboot when ready. The next boot will start the Arch installer.'
-    fi
+    log 'Rebooting into Alpine; the selected disk will be erased'
+    systemctl reboot
 }
 
 partition_path() {
@@ -939,7 +933,7 @@ installer_main() {
         die "Installer payload checksum mismatch (expected $expected_sha, got $actual_sha)"
 
     local disk hostname timezone dns authorized_key package_mirror extra_packages kernel ntp
-    local boot_mode swap_mib hold power_off boot_cidr boot_gateway boot_mac
+    local boot_mode swap_mib hold boot_cidr boot_gateway boot_mac
     local ssh_port bbr fail2ban firmware ethx grub_timeout
     disk=$(decode_b64 "$(cmdline_value archi_disk_b64)")
     hostname=$(decode_b64 "$(cmdline_value archi_hostname_b64)")
@@ -953,7 +947,6 @@ installer_main() {
     boot_mode=$(cmdline_value archi_boot_mode)
     swap_mib=$(cmdline_value archi_swap_mib)
     hold=$(cmdline_value archi_hold)
-    power_off=$(cmdline_value archi_poweroff)
     boot_cidr=$(cmdline_value archi_boot_cidr || true)
     boot_gateway=$(cmdline_value archi_gateway || true)
     boot_mac=$(cmdline_value archi_boot_mac || true)
@@ -1337,11 +1330,7 @@ EOF
     log 'Arch Linux installation completed successfully'
 
     trap - ERR
-    if [[ $power_off == 1 ]]; then
-        poweroff -f
-    else
-        reboot -f
-    fi
+    reboot -f
 }
 
 if is_install_environment; then
