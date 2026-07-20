@@ -1220,6 +1220,7 @@ net.ipv4.tcp_window_scaling = 1
 net.ipv4.tcp_wmem = 4096 16384 33554432
 EOF
         chmod 0644 /mnt/etc/sysctl.d/99-archi-bbr.conf
+        ln -sfn sysctl.d/99-archi-bbr.conf /mnt/etc/sysctl.conf
     fi
 
     install -d -m 0755 /mnt/etc/systemd/network
