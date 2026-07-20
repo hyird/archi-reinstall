@@ -43,7 +43,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/hyird/archi-reinstall/main/a
 | `--kernel linux` | 使用 Arch 主线内核 |
 | `--firmware` | 安装 `linux-firmware` |
 | `--install "PKG ..."` | 安装额外官方仓库软件包 |
-| `--bbr` | 启用 TCP BBR |
+| `--bbr` | 启用 BBR 和高并发网络参数 |
 | `--fail2ban` | 启用 SSH 防护 |
 | `--swap-mib N` | 创建 N MiB swap 文件 |
 | `--tuna` / `--ustc` / `--aliyun` | 使用中国大陆镜像和网络服务 |

@@ -1157,12 +1157,53 @@ EOF
     chmod 0644 /mnt/etc/systemd/timesyncd.conf.d/60-archi-cloud.conf
 
     if [[ $bbr == true ]]; then
+        local total_memory_kb total_memory_gb tcp_mem
+        total_memory_kb=$(awk '/^MemTotal:/ {print $2}' /proc/meminfo)
+        total_memory_gb=$((total_memory_kb / 1024 / 1024))
+        if (( total_memory_gb < 4 )); then
+            tcp_mem='262144 786432 2097152'
+        elif (( total_memory_gb < 7 )); then
+            tcp_mem='524288 1048576 2097152'
+        elif (( total_memory_gb < 11 )); then
+            tcp_mem='786432 1048576 3145728'
+        elif (( total_memory_gb < 15 )); then
+            tcp_mem='1048576 1572864 3145728'
+        elif (( total_memory_gb < 20 )); then
+            tcp_mem='2097152 3145728 4194304'
+        elif (( total_memory_gb < 25 )); then
+            tcp_mem='3145728 4194304 8388608'
+        else
+            tcp_mem='6291456 8388608 16777216'
+        fi
         install -d -m 0755 /mnt/etc/sysctl.d
-        cat > /mnt/etc/sysctl.d/60-archi-cloud.conf <<'EOF'
-net.core.default_qdisc=fq
-net.ipv4.tcp_congestion_control=bbr
+        cat > /mnt/etc/sysctl.d/99-archi-bbr.conf <<EOF
+fs.file-max = 1000000
+fs.inotify.max_user_instances = 131072
+net.core.default_qdisc = fq
+net.core.rmem_max = 67108864
+net.core.somaxconn = 65535
+net.core.wmem_max = 33554432
+net.ipv4.ip_local_port_range = 10000 49999
+net.ipv4.tcp_congestion_control = bbr
+net.ipv4.tcp_fin_timeout = 15
+net.ipv4.tcp_keepalive_time = 30
+net.ipv4.tcp_keepalive_intvl = 15
+net.ipv4.tcp_keepalive_probes = 5
+net.ipv4.tcp_max_syn_backlog = 4194304
+net.ipv4.tcp_max_tw_buckets = 262144
+net.ipv4.tcp_mem = $tcp_mem
+net.ipv4.tcp_moderate_rcvbuf = 1
+net.ipv4.tcp_rfc1337 = 1
+net.ipv4.tcp_rmem = 16384 131072 67108864
+net.ipv4.tcp_sack = 1
+net.ipv4.tcp_slow_start_after_idle = 0
+net.ipv4.tcp_syn_retries = 3
+net.ipv4.tcp_synack_retries = 3
+net.ipv4.tcp_syncookies = 1
+net.ipv4.tcp_window_scaling = 1
+net.ipv4.tcp_wmem = 4096 16384 33554432
 EOF
-        chmod 0644 /mnt/etc/sysctl.d/60-archi-cloud.conf
+        chmod 0644 /mnt/etc/sysctl.d/99-archi-bbr.conf
     fi
 
     install -d -m 0755 /mnt/etc/systemd/network
