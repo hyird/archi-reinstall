@@ -18,19 +18,19 @@ curl -fLO https://raw.githubusercontent.com/hyird/archi-reinstall/main/archi.sh 
 先检查安装计划，不修改系统：
 
 ```bash
-sudo ./archi.sh --dry-run --authorized-key-file /root/.ssh/authorized_keys --disk /dev/vda
+./archi.sh --dry-run --authorized-key-file /root/.ssh/authorized_keys --disk /dev/vda
 ```
 
 确认无误后开始重装。脚本完成 staging 后会立即重启：
 
 ```bash
-sudo ./archi.sh --authorized-key-file /root/.ssh/authorized_keys --disk /dev/vda
+./archi.sh --authorized-key-file /root/.ssh/authorized_keys --disk /dev/vda
 ```
 
 也可以直接传入公钥或从 URL 下载：
 
 ```bash
-sudo ./archi.sh --authorized-keys-url https://github.com/USERNAME.keys --disk /dev/vda
+./archi.sh --authorized-keys-url https://github.com/USERNAME.keys --disk /dev/vda
 ```
 
 如果 staging 完成后不想立即重启，添加 `--no-reboot`，准备好后再手动执行 `reboot`。
@@ -81,7 +81,7 @@ sudo ./archi.sh --authorized-keys-url https://github.com/USERNAME.keys --disk /d
 示例：
 
 ```bash
-sudo ./archi.sh --tuna --authorized-key-file /root/.ssh/authorized_keys --disk /dev/vda
+./archi.sh --tuna --authorized-key-file /root/.ssh/authorized_keys --disk /dev/vda
 ```
 
 也可以分别使用 `--alpine-mirror URL` 和 `--package-mirror URL` 指定镜像。Arch 镜像地址需要包含字面量 `$repo/os/$arch`。
@@ -154,19 +154,19 @@ sudo ./archi.sh --tuna --authorized-key-file /root/.ssh/authorized_keys --disk /
 安装主线内核、firmware 和额外软件包：
 
 ```bash
-sudo ./archi.sh --kernel linux --firmware --install "git htop tmux" --authorized-key-file /root/.ssh/authorized_keys --disk /dev/nvme0n1
+./archi.sh --kernel linux --firmware --install "git htop tmux" --authorized-key-file /root/.ssh/authorized_keys --disk /dev/nvme0n1
 ```
 
 手动指定静态网络：
 
 ```bash
-sudo ./archi.sh --ip 192.0.2.10/24 --gateway 192.0.2.1 --dns "1.1.1.1 1.0.0.1" --authorized-key-file /root/.ssh/authorized_keys --disk /dev/vda
+./archi.sh --ip 192.0.2.10/24 --gateway 192.0.2.1 --dns "1.1.1.1 1.0.0.1" --authorized-key-file /root/.ssh/authorized_keys --disk /dev/vda
 ```
 
 启用 BBR、Fail2ban，并修改 SSH 端口：
 
 ```bash
-sudo ./archi.sh --bbr --fail2ban --ssh-port 2222 --authorized-key-file /root/.ssh/authorized_keys --disk /dev/vda
+./archi.sh --bbr --fail2ban --ssh-port 2222 --authorized-key-file /root/.ssh/authorized_keys --disk /dev/vda
 ```
 
 ## 查看安装进度
@@ -191,7 +191,7 @@ ARCHI_FORCE_INSTALL=1 /root/archi.sh
 只要尚未重启进入 Alpine，就可以移除临时 GRUB 启动项和下载文件：
 
 ```bash
-sudo ./archi.sh --cleanup
+./archi.sh --cleanup
 ```
 
 ## 工作原理
@@ -211,7 +211,7 @@ sudo ./archi.sh --cleanup
 
 ```bash
 lsblk
-sudo ./archi.sh --disk /dev/vda ...
+./archi.sh --disk /dev/vda ...
 ```
 
 **当前网络配置无法完整继承**
