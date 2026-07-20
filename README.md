@@ -3,39 +3,40 @@
 `archi.sh` 通过 GRUB 和 Alpine 临时环境，将 x86_64 云主机或物理机重装为最小化 Arch Linux。系统使用 `pacstrap` 从 Arch 仓库直接安装，不使用预制镜像。
 
 > [!CAUTION]
-> 安装会清空目标磁盘。请确认 SSH 公钥和磁盘无误后再执行。
+> 安装会清空目标磁盘。请确认登录凭据和磁盘无误后再执行。
 
 ## 快速开始
 
 以 root 用户执行：
 
 ```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/hyird/archi-reinstall/main/archi.sh)
+bash <(curl -fsSL https://raw.githubusercontent.com/hyird/archi-reinstall/main/archi.sh) --authorized-key /root/.ssh/authorized_keys
 ```
 
-脚本默认读取 `/root/.ssh/authorized_keys`、自动探测系统盘和当前网络，完成准备后立即重启安装。
+必须提供 `--authorized-key` 或 `--password`。两者同时提供时禁用 SSH 密码登录，仅允许公钥登录。
 
 ## 常用选项
 
-| 选项 | 说明 |
-|---|---|
-| `--disk /dev/vda` | 指定要清空的整块磁盘 |
-| `--authorized-key /root/.ssh/authorized_keys` | 使用公钥文本、文件路径或 URL |
-| `--hostname arch` | 设置主机名 |
-| `--timezone Asia/Shanghai` | 设置时区 |
-| `--ip 192.0.2.10/24` | 设置静态 IPv4 地址 |
-| `--gateway 192.0.2.1` | 设置 IPv4 网关 |
-| `--dns 1.1.1.1` | 设置 DNS 服务器，默认 `1.1.1.1` |
-| `--ssh-port 22` | 设置 SSH 端口 |
-| `--ethx` | 使用 `eth0` 风格网卡名 |
-| `--install "git htop"` | 安装额外官方仓库软件包 |
-| `--bbr` | 启用 BBR 和高并发网络参数 |
-| `--fail2ban` | 启用 SSH 防护 |
-| `--swap-mib 1024` | 创建 1024 MiB swap 文件 |
-| `--mirror https://mirrors.cloud.tencent.com/archlinux` | 设置 Arch 镜像根地址，仓库路径由脚本自动补全 |
-| `--tuna` / `--ustc` / `--aliyun` / `--tencent` | 使用中国大陆镜像和网络服务 |
-| `--dry-run` | 只检查并显示安装计划 |
-| `--hold` | 进入 Alpine 后等待手动确认，不擦盘 |
+| 选项 | 默认值 | 说明 |
+|---|---|---|
+| `--disk /dev/vda` | 自动探测 | 指定要清空的整块磁盘 |
+| `--authorized-key /root/.ssh/authorized_keys` | — | 使用公钥文本、文件路径或 URL |
+| `--password 'Archi-2026!'` | — | 设置 root 密码 |
+| `--hostname arch` | `arch` | 设置主机名 |
+| `--timezone Asia/Shanghai` | `Asia/Shanghai` | 设置时区 |
+| `--ip 192.0.2.10/24` | 继承当前配置 | 设置静态 IPv4 地址 |
+| `--gateway 192.0.2.1` | 继承当前配置 | 设置 IPv4 网关 |
+| `--dns 1.1.1.1` | `1.1.1.1` | 设置 DNS 服务器 |
+| `--ssh-port 22` | `22` | 设置 SSH 端口 |
+| `--ethx` | 关闭 | 使用 `eth0` 风格网卡名 |
+| `--install "git htop"` | — | 安装额外官方仓库软件包 |
+| `--bbr` | 关闭 | 启用 BBR 和高并发网络参数 |
+| `--fail2ban` | 关闭 | 启用 SSH 防护 |
+| `--swap-mib 1024` | `0` | 创建 1024 MiB swap 文件 |
+| `--mirror https://mirrors.cloud.tencent.com/archlinux` | Arch 官方镜像 | 设置 Arch 镜像根地址 |
+| `--tuna` / `--ustc` / `--aliyun` / `--tencent` | 关闭 | 使用中国大陆镜像和网络服务 |
+| `--dry-run` | 关闭 | 只检查并显示安装计划 |
+| `--hold` | 关闭 | 进入 Alpine 后等待手动确认，不擦盘 |
 
 查看脚本帮助：
 
@@ -54,24 +55,24 @@ bash <(curl -fsSL https://raw.githubusercontent.com/hyird/archi-reinstall/main/a
 使用腾讯云镜像并启用 BBR：
 
 ```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/hyird/archi-reinstall/main/archi.sh) --tencent --dns 1.1.1.1 --bbr
+bash <(curl -fsSL https://raw.githubusercontent.com/hyird/archi-reinstall/main/archi.sh) --tencent --dns 1.1.1.1 --bbr --authorized-key /root/.ssh/authorized_keys
 ```
 
 手动设置 Arch 镜像：
 
 ```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/hyird/archi-reinstall/main/archi.sh) --mirror https://mirrors.cloud.tencent.com/archlinux
+bash <(curl -fsSL https://raw.githubusercontent.com/hyird/archi-reinstall/main/archi.sh) --mirror https://mirrors.cloud.tencent.com/archlinux --password 'Archi-2026!'
 ```
 
 只检查配置：
 
 ```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/hyird/archi-reinstall/main/archi.sh) --dry-run
+bash <(curl -fsSL https://raw.githubusercontent.com/hyird/archi-reinstall/main/archi.sh) --dry-run --password 'Archi-2026!'
 ```
 
 ## 安装进度
 
-重启进入 Alpine 后，可以使用原 root 公钥连接服务器并查看日志：
+重启进入 Alpine 后，可以使用配置的 root 凭据连接服务器并查看日志：
 
 ```bash
 ssh root@192.0.2.10

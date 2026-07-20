@@ -52,6 +52,7 @@ Usage:
 Options:
   --authorized-key /root/.ssh/authorized_keys
                                Root SSH public key, file path, or URL.
+  --password 'Archi-2026!'     Root password.
   --disk /dev/vda              Whole target disk.
   --hostname arch              Installed hostname (default: arch).
   --timezone Asia/Shanghai     Installed timezone (default: Asia/Shanghai).
@@ -285,9 +286,18 @@ build_boot_network_parameter() {
 
 build_alpine_initramfs() {
     local original=$1 destination=$2 authorized_key=$3 hostname=$4 ssh_port=$5 dns=$6
-    local alpine_mirror=$7
-    local work apkovl overlay apkovl_archive overlay_archive dns_server
+    local alpine_mirror=$7 password_hash=$8
+    local work apkovl overlay apkovl_archive overlay_archive dns_server shadow_last_change
+    local permit_root_login='prohibit-password' password_auth='no' shadow_password='*'
+    if [[ -n $password_hash ]]; then
+        shadow_password=$password_hash
+        if [[ -z $authorized_key ]]; then
+            permit_root_login='yes'
+            password_auth='yes'
+        fi
+    fi
     work=$(mktemp -d)
+    shadow_last_change=$(($(date +%s) / 86400))
     apkovl=$work/apkovl
     overlay=$work/overlay
     apkovl_archive=$overlay/archi.apkovl.tar.gz
@@ -325,9 +335,7 @@ root:x:0:root
 wheel:x:10:root
 sshd:x:22:
 EOF
-    cat > "$apkovl/etc/shadow" <<'EOF'
-root:*:0:0:99999:7:::
-EOF
+    printf 'root:%s:%s:0:99999:7:::\n' "$shadow_password" "$shadow_last_change" > "$apkovl/etc/shadow"
     : > "$apkovl/etc/resolv.conf"
     for dns_server in $dns; do
         printf 'nameserver %s\n' "$dns_server" >> "$apkovl/etc/resolv.conf"
@@ -353,10 +361,10 @@ Include = /etc/pacman.d/mirrorlist
 [extra]
 Include = /etc/pacman.d/mirrorlist
 EOF
-    cat > "$apkovl/etc/ssh/sshd_config.d/60-archi-key-only.conf" <<EOF
+    cat > "$apkovl/etc/ssh/sshd_config.d/60-archi-root-auth.conf" <<EOF
 Port $ssh_port
-PermitRootLogin prohibit-password
-PasswordAuthentication no
+PermitRootLogin $permit_root_login
+PasswordAuthentication $password_auth
 KbdInteractiveAuthentication no
 PermitEmptyPasswords no
 LoginGraceTime 30
@@ -365,7 +373,9 @@ MaxStartups 10:30:30
 PerSourceMaxStartups 3
 X11Forwarding no
 EOF
-    printf '%s\n' "$authorized_key" > "$apkovl/root/.ssh/authorized_keys"
+    if [[ -n $authorized_key ]]; then
+        printf '%s\n' "$authorized_key" > "$apkovl/root/.ssh/authorized_keys"
+    fi
     cp -f -- "$ARCHI_SOURCE_FILE" "$apkovl/root/archi.sh"
     cat > "$apkovl/root/archi-init" <<'EOF'
 #!/bin/sh
@@ -436,13 +446,15 @@ EOF
     find "$apkovl" -type d -exec chmod 0755 {} +
     chmod 0700 "$apkovl/root" "$apkovl/root/.ssh" "$apkovl/root/archi.sh" \
         "$apkovl/root/archi-init"
-    chmod 0600 "$apkovl/root/.ssh/authorized_keys"
+    if [[ -e $apkovl/root/.ssh/authorized_keys ]]; then
+        chmod 0600 "$apkovl/root/.ssh/authorized_keys"
+    fi
     chmod 0600 "$apkovl/etc/shadow"
     chmod 0644 "$apkovl/etc/hostname" "$apkovl/etc/resolv.conf" \
         "$apkovl/etc/passwd" "$apkovl/etc/group" "$apkovl/etc/apk/repositories" \
         "$apkovl/etc/archi-modloop-url" \
         "$apkovl/etc/pacman.conf" \
-        "$apkovl/etc/ssh/sshd_config.d/60-archi-key-only.conf"
+        "$apkovl/etc/ssh/sshd_config.d/60-archi-root-auth.conf"
 
     (cd "$apkovl" && tar --numeric-owner --owner=0 --group=0 -czf "$apkovl_archive" .)
 
@@ -552,7 +564,7 @@ cleanup_stage() {
 stage_main() {
     local alpine_mirror=$DEFAULT_ALPINE_MIRROR
     local package_mirror=$DEFAULT_PACKAGE_MIRROR
-    local authorized_key_input='' authorized_key_literal=''
+    local authorized_key_input='' authorized_key_literal='' password=''
     local authorized_key_file=''
     local disk=''
     local hostname='arch'
@@ -574,12 +586,6 @@ stage_main() {
     local dry_run=false cleanup=false
     local source_tmp='' authorized_key_tmp=''
 
-    if [[ -r /root/.ssh/authorized_keys ]]; then
-        authorized_key_file=/root/.ssh/authorized_keys
-    elif [[ -n ${HOME:-} && -r $HOME/.ssh/authorized_keys ]]; then
-        authorized_key_file=$HOME/.ssh/authorized_keys
-    fi
-
     while (($#)); do
         case $1 in
             --aliyun) alpine_mirror=$ALIYUN_ALPINE_MIRROR; package_mirror=$ALIYUN_PACKAGE_MIRROR; dns='223.5.5.5 223.6.6.6'; ntp='time.amazonaws.cn'; shift ;;
@@ -588,6 +594,7 @@ stage_main() {
             --tencent) alpine_mirror=$TENCENT_ALPINE_MIRROR; package_mirror=$TENCENT_PACKAGE_MIRROR; dns='119.29.29.29'; ntp='time.amazonaws.cn'; shift ;;
             --mirror) package_mirror="$(trim_trailing_slash "${2:?missing value}")/\$repo/os/\$arch"; shift 2 ;;
             --authorized-key) authorized_key_input=${2:?missing value}; shift 2 ;;
+            --password) password=${2:?missing value}; shift 2 ;;
             --disk) disk=${2:?missing value}; shift 2 ;;
             --hostname) hostname=${2:?missing value}; shift 2 ;;
             --timezone) timezone=${2:?missing value}; shift 2 ;;
@@ -647,8 +654,9 @@ stage_main() {
             authorized_key_literal=$authorized_key_input
         fi
     fi
-    [[ -n $authorized_key_literal || -n $authorized_key_file ]] ||
-        die 'Provide --authorized-key as a public key, file path, or URL'
+    [[ -n $authorized_key_literal || -n $authorized_key_file || -n $password ]] ||
+        die 'Provide --authorized-key or --password'
+    [[ $password != *$'\n'* && $password != *:* ]] || die 'Password contains an unsupported character'
     validate_hostname "$hostname"
     validate_packages "$extra_packages"
     validate_port "$ssh_port"
@@ -680,13 +688,18 @@ stage_main() {
         warn "Only $((mem_kib / 1024)) MiB RAM detected; the Alpine installer may run out of memory"
     fi
 
-    local authorized_key
+    local authorized_key='' password_hash=''
     if [[ -n $authorized_key_literal ]]; then
         authorized_key=$(first_public_key_text "$authorized_key_literal")
         [[ -n $authorized_key ]] || die 'No supported SSH public key found in --authorized-key'
-    else
+    elif [[ -n $authorized_key_file ]]; then
         authorized_key=$(first_public_key "$authorized_key_file")
         [[ -n $authorized_key ]] || die "No supported SSH public key found in $authorized_key_file"
+    fi
+    if [[ -n $password ]]; then
+        need_cmd openssl
+        password_hash=$(printf '%s\n' "$password" | openssl passwd -6 -stdin)
+        [[ $password_hash == '$6$'* ]] || die 'Could not hash the root password'
     fi
 
     local boot_interface bootif
@@ -763,7 +776,7 @@ stage_main() {
   boot network:      $boot_network
   DNS servers:       $dns
   payload SHA-256:   $payload_sha
-  root SSH key:      $(printf '%s' "$authorized_key" | awk '{if (NF >= 3) print $1, $3; else print $1, "(no comment)"}')
+  root authentication: $(if [[ -n $authorized_key && -n $password_hash ]]; then printf 'SSH key (password login disabled)'; elif [[ -n $authorized_key ]]; then printf 'SSH key'; else printf 'password'; fi)
   SSH port:          $ssh_port
   kernel package:    $kernel
   firmware bundle:   $firmware
@@ -790,16 +803,17 @@ EOF
     download_file "$initramfs_url" "$install_dir/initramfs-virt.official" 3000000
     build_alpine_initramfs "$install_dir/initramfs-virt.official" \
         "$install_dir/initramfs-virt" "$authorized_key" 'alpine' "$ssh_port" "$dns" \
-        "$alpine_mirror"
+        "$alpine_mirror" "$password_hash"
     rm -f -- "$install_dir/initramfs-virt.official"
 
-    local disk_b64 hostname_b64 timezone_b64 dns_b64 key_b64 package_mirror_b64
+    local disk_b64 hostname_b64 timezone_b64 dns_b64 key_b64 password_hash_b64 package_mirror_b64
     local extra_packages_b64 kernel_b64 ntp_b64
     disk_b64=$(encode_b64 "$disk")
     hostname_b64=$(encode_b64 "$hostname")
     timezone_b64=$(encode_b64 "$timezone")
     dns_b64=$(encode_b64 "$dns")
     key_b64=$(encode_b64 "$authorized_key")
+    password_hash_b64=$(encode_b64 "$password_hash")
     package_mirror_b64=$(encode_b64 "$package_mirror")
     extra_packages_b64=$(encode_b64 "$extra_packages")
     kernel_b64=$(encode_b64 "$kernel")
@@ -860,7 +874,7 @@ menuentry 'Arch Linux network reinstall (ERASES TARGET DISK)' --id archi {
     insmod part_gpt
     insmod part_msdos
     insmod ext2
-    linux $grub_kernel modules=loop,squashfs,sd_mod,usb_storage,virtio_scsi,virtio_blk alpine_repo=$alpine_mirror/latest-stable/main,$alpine_mirror/latest-stable/community apkovl=/archi.apkovl.tar.gz init=/root/archi-init $boot_network archi_mode=install archi_payload_sha256=$payload_sha archi_disk_b64=$disk_b64 archi_hostname_b64=$hostname_b64 archi_timezone_b64=$timezone_b64 archi_dns_b64=$dns_b64 archi_key_b64=$key_b64 archi_package_mirror_b64=$package_mirror_b64 archi_extra_packages_b64=$extra_packages_b64 archi_kernel_b64=$kernel_b64 archi_ntp_b64=$ntp_b64 archi_boot_mode=$boot_mode archi_swap_mib=$swap_mib archi_hold=$hold_flag archi_boot_cidr=$boot_cidr archi_gateway=$boot_gateway archi_boot_mac=$boot_mac archi_dns_csv=$dns_csv archi_ssh_port=$ssh_port archi_bbr=$bbr archi_fail2ban=$fail2ban archi_firmware=$firmware archi_ethx=$ethx archi_grub_timeout=$grub_timeout
+    linux $grub_kernel modules=loop,squashfs,sd_mod,usb_storage,virtio_scsi,virtio_blk alpine_repo=$alpine_mirror/latest-stable/main,$alpine_mirror/latest-stable/community apkovl=/archi.apkovl.tar.gz init=/root/archi-init $boot_network archi_mode=install archi_payload_sha256=$payload_sha archi_disk_b64=$disk_b64 archi_hostname_b64=$hostname_b64 archi_timezone_b64=$timezone_b64 archi_dns_b64=$dns_b64 archi_key_b64=$key_b64 archi_password_hash_b64=$password_hash_b64 archi_package_mirror_b64=$package_mirror_b64 archi_extra_packages_b64=$extra_packages_b64 archi_kernel_b64=$kernel_b64 archi_ntp_b64=$ntp_b64 archi_boot_mode=$boot_mode archi_swap_mib=$swap_mib archi_hold=$hold_flag archi_boot_cidr=$boot_cidr archi_gateway=$boot_gateway archi_boot_mac=$boot_mac archi_dns_csv=$dns_csv archi_ssh_port=$ssh_port archi_bbr=$bbr archi_fail2ban=$fail2ban archi_firmware=$firmware archi_ethx=$ethx archi_grub_timeout=$grub_timeout
     initrd $grub_initramfs
 }
 EOF
@@ -932,7 +946,7 @@ installer_main() {
     [[ $expected_sha =~ ^[0-9a-f]{64}$ && $actual_sha == "$expected_sha" ]] ||
         die "Installer payload checksum mismatch (expected $expected_sha, got $actual_sha)"
 
-    local disk hostname timezone dns authorized_key package_mirror extra_packages kernel ntp
+    local disk hostname timezone dns authorized_key password_hash package_mirror extra_packages kernel ntp
     local boot_mode swap_mib hold boot_cidr boot_gateway boot_mac
     local ssh_port bbr fail2ban firmware ethx grub_timeout
     disk=$(decode_b64 "$(cmdline_value archi_disk_b64)")
@@ -940,6 +954,7 @@ installer_main() {
     timezone=$(decode_b64 "$(cmdline_value archi_timezone_b64)")
     dns=$(decode_b64 "$(cmdline_value archi_dns_b64)")
     authorized_key=$(decode_b64 "$(cmdline_value archi_key_b64)")
+    password_hash=$(decode_b64 "$(cmdline_value archi_password_hash_b64)")
     package_mirror=$(decode_b64 "$(cmdline_value archi_package_mirror_b64)")
     extra_packages=$(decode_b64 "$(cmdline_value archi_extra_packages_b64)")
     kernel=$(decode_b64 "$(cmdline_value archi_kernel_b64)")
@@ -972,6 +987,7 @@ installer_main() {
     [[ $ethx == true || $ethx == false ]] || die 'Invalid ethx setting'
     [[ $grub_timeout =~ ^[0-9]+$ && $grub_timeout -le 60 ]] || die 'Invalid GRUB timeout'
     [[ $ntp =~ ^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?$ ]] || die 'Invalid NTP host'
+    [[ -n $authorized_key || $password_hash == '$6$'* ]] || die 'No valid root authentication was supplied'
     [[ -e /usr/share/zoneinfo/$timezone ]] || die "Unknown timezone: $timezone"
     validate_url 'package mirror' "$package_mirror"
 
@@ -984,14 +1000,21 @@ installer_main() {
     chmod 0644 /etc/hostname
     hostname alpine
 
-    install -d -m 0700 /root/.ssh
-    printf '%s\n' "$authorized_key" > /root/.ssh/authorized_keys
-    chmod 0600 /root/.ssh/authorized_keys
+    if [[ -n $authorized_key ]]; then
+        install -d -m 0700 /root/.ssh
+        printf '%s\n' "$authorized_key" > /root/.ssh/authorized_keys
+        chmod 0600 /root/.ssh/authorized_keys
+    fi
+    local permit_root_login='yes' password_auth='yes'
+    if [[ -n $authorized_key ]]; then
+        permit_root_login='prohibit-password'
+        password_auth='no'
+    fi
     install -d -m 0755 /etc/ssh/sshd_config.d
-    cat > /etc/ssh/sshd_config.d/60-archi-key-only.conf <<EOF
+    cat > /etc/ssh/sshd_config.d/60-archi-root-auth.conf <<EOF
 Port $ssh_port
-PermitRootLogin prohibit-password
-PasswordAuthentication no
+PermitRootLogin $permit_root_login
+PasswordAuthentication $password_auth
 KbdInteractiveAuthentication no
 PermitEmptyPasswords no
 LoginGraceTime 30
@@ -1000,7 +1023,7 @@ MaxStartups 10:30:30
 PerSourceMaxStartups 3
 X11Forwarding no
 EOF
-    chmod 0644 /etc/ssh/sshd_config.d/60-archi-key-only.conf
+    chmod 0644 /etc/ssh/sshd_config.d/60-archi-root-auth.conf
     cp -f -- "${BASH_SOURCE[0]}" /root/archi-installer.sh
     chmod 0700 /root/archi-installer.sh
 
@@ -1017,7 +1040,7 @@ EOF
   boot mode:        $boot_mode
   hostname:         $hostname
   package mirror:   $package_mirror
-  root SSH:         key only
+  root SSH:         $(if [[ -n $authorized_key ]]; then printf 'key only'; else printf 'password'; fi)
   SSH port:         $ssh_port
   NTP:              $ntp
   firmware bundle:  $firmware
@@ -1028,7 +1051,7 @@ EOF
 
     if [[ $hold == 1 && ${ARCHI_FORCE_INSTALL:-0} != 1 ]]; then
         log 'Hold mode is active; no disk changes were made.'
-        log 'SSH is available with the supplied root key.'
+        log 'SSH is available with the configured root authentication.'
         log 'To continue destructively: ARCHI_FORCE_INSTALL=1 /root/archi.sh'
         return 0
     fi
@@ -1226,14 +1249,16 @@ EOF
     arch-chroot /mnt systemctl enable systemd-networkd.service systemd-resolved.service \
         systemd-timesyncd.service sshd.service
 
-    install -d -m 0700 /mnt/root/.ssh
-    printf '%s\n' "$authorized_key" > /mnt/root/.ssh/authorized_keys
-    chmod 0600 /mnt/root/.ssh/authorized_keys
+    if [[ -n $authorized_key ]]; then
+        install -d -m 0700 /mnt/root/.ssh
+        printf '%s\n' "$authorized_key" > /mnt/root/.ssh/authorized_keys
+        chmod 0600 /mnt/root/.ssh/authorized_keys
+    fi
     install -d -m 0755 /mnt/etc/ssh/sshd_config.d
-    cat > /mnt/etc/ssh/sshd_config.d/60-key-only.conf <<EOF
+    cat > /mnt/etc/ssh/sshd_config.d/60-root-auth.conf <<EOF
 Port $ssh_port
-PermitRootLogin prohibit-password
-PasswordAuthentication no
+PermitRootLogin $permit_root_login
+PasswordAuthentication $password_auth
 KbdInteractiveAuthentication no
 PermitEmptyPasswords no
 LoginGraceTime 30
@@ -1242,8 +1267,12 @@ MaxStartups 10:30:30
 PerSourceMaxStartups 3
 X11Forwarding no
 EOF
-    chmod 0644 /mnt/etc/ssh/sshd_config.d/60-key-only.conf
-    arch-chroot /mnt passwd --lock root
+    chmod 0644 /mnt/etc/ssh/sshd_config.d/60-root-auth.conf
+    if [[ -n $password_hash ]]; then
+        printf 'root:%s\n' "$password_hash" | arch-chroot /mnt chpasswd -e
+    else
+        arch-chroot /mnt passwd --lock root
+    fi
 
     if [[ $fail2ban == true ]]; then
         install -d -m 0755 /mnt/etc/fail2ban/jail.d
