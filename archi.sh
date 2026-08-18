@@ -13,7 +13,7 @@ umask 077
 # Functions use POSIX subshell bodies where variable isolation is required.
 
 readonly ARCHI_PAYLOAD_ID='archi-network-reinstall-v1'
-readonly ARCHI_VERSION='0.9.3'
+readonly ARCHI_VERSION='0.9.4'
 readonly ARCHI_RAW_URL='https://raw.githubusercontent.com/hyird/archi-reinstall/main/archi.sh'
 ARCHI_SOURCE_FILE=$0
 readonly DEFAULT_ALPINE_MIRROR='https://dl-cdn.alpinelinux.org/alpine'
@@ -137,16 +137,19 @@ is_ipv4() (
 
 validate_dns_servers() (
     [ -n "$1" ] || die 'At least one IPv4 DNS server is required'
+    # Spelled out field by field rather than with an /(...){3}/ interval: mawk
+    # is the default awk on Debian and did not support interval expressions
+    # before 1.3.4-20240123, where the regex silently never matches and every
+    # address is rejected.
     printf '%s\n' "$1" | LC_ALL=C awk '
         {
             count += NF
             for (i = 1; i <= NF; i++) {
-                split($i, octets, ".")
-                if ($i !~ /^([0-9]+\.){3}[0-9]+$/ || length(octets[1]) > 3 ||
-                    length(octets[2]) > 3 || length(octets[3]) > 3 ||
-                    length(octets[4]) > 3 || octets[1] + 0 > 255 ||
-                    octets[2] + 0 > 255 || octets[3] + 0 > 255 ||
-                    octets[4] + 0 > 255) exit 1
+                if (split($i, octets, ".") != 4) exit 1
+                for (j = 1; j <= 4; j++) {
+                    if (octets[j] !~ /^[0-9]+$/ || length(octets[j]) > 3 ||
+                        octets[j] + 0 > 255) exit 1
+                }
             }
         }
         END { if (count == 0) exit 1 }
@@ -198,6 +201,9 @@ is_install_environment() (
 detect_root_disk() (
     source='' disks='' disk_count=0
     source=$(findmnt -n -o SOURCE / 2>/dev/null || true)
+    # On btrfs the source carries the subvolume, as in /dev/sda4[/root], which
+    # lsblk will not accept as a device.
+    source=$(printf '%s' "$source" | sed 's/\[.*$//')
     case $source in
         /dev/*)
             disks=$(lsblk -srpno NAME,TYPE "$source" 2>/dev/null |
@@ -210,7 +216,11 @@ detect_root_disk() (
             ;;
     esac
 
-    disks=$(lsblk -dpno NAME,TYPE | awk '$2 == "disk" {print $1}')
+    # lsblk reports zram and friends as TYPE=disk, so counting them would make
+    # this look ambiguous on any distribution with zram swap enabled, Fedora
+    # being the common case.
+    disks=$(lsblk -dpno NAME,TYPE |
+        awk '$2 == "disk" && $1 !~ /^\/dev\/(zram|loop|ram|nbd|fd|dm-)[0-9]/ { print $1 }')
     disk_count=$(printf '%s\n' "$disks" | awk 'NF { count++ } END { print count + 0 }')
     [ "$disk_count" -eq 1 ] ||
         die "Could not safely determine the target disk; use --disk"
@@ -460,9 +470,11 @@ ln -sfn /proc/self/fd/2 /dev/stderr
 ln -sfn /proc/mounts /etc/mtab
 # Nothing below writes to /dev/console: the consoles belong to the getty logins
 # started further down, and anything printed underneath a waiting getty makes it
-# bail out and reprint its prompt. Progress lives in the logs instead, which is
-# what /etc/motd and /root/.profile point at.
-exec >>/tmp/archi-init.log 2>&1
+# bail out and reprint its prompt. Progress lives in the log instead, and it has
+# to be the same log /etc/motd and /root/.profile point at -- when setup fails
+# here the installer usually dies later of an unrelated-looking symptom, so the
+# cause has to be in the file the user is actually told to read.
+exec >>/tmp/archi-install.log 2>&1
 echo '[archi] Alpine installer init started.'
 cat > /etc/motd <<'MOTD'
 
@@ -529,7 +541,7 @@ sshd_rc=$?
 echo "[archi] sshd exit status: $sshd_rc"
 [ "$sshd_rc" -eq 0 ] || cat /tmp/archi-sshd.log
 echo '[archi] SSH should be ready. Follow installation with: tail -f /tmp/archi-install.log'
-/root/archi.sh </dev/null >>/tmp/archi-init.log 2>&1 &
+/root/archi.sh </dev/null >>/tmp/archi-install.log 2>&1 &
 installer_pid=$!
 while :; do
     if ! kill -0 "$installer_pid" 2>/dev/null; then
@@ -646,17 +658,37 @@ download_file() (
     mv -f -- "$temporary" "$destination"
 )
 
+# Red Hat derivatives ship every GRUB 2 utility under a grub2- prefix, so each
+# one has to be looked up rather than assumed.
+grub_tool() (
+    name=$1
+    for candidate in "grub-$name" "grub2-$name"; do
+        if command -v "$candidate" >/dev/null 2>&1; then
+            printf '%s' "$candidate"
+            return 0
+        fi
+    done
+    return 1
+)
+
+# Debian and Ubuntu patch grub-mkconfig to source /etc/default/grub.d/*.cfg.
+# Red Hat derivatives do not, so a drop-in there would be silently ignored.
+grub_reads_default_dir() (
+    mkconfig=$(grub_tool mkconfig) || return 1
+    grep -q 'default/grub\.d' "$(command -v "$mkconfig")" 2>/dev/null
+)
+
 update_grub_config() (
     if command -v update-grub >/dev/null 2>&1; then
         update-grub
-    elif command -v grub-mkconfig >/dev/null 2>&1; then
+    elif mkconfig=$(grub_tool mkconfig); then
         output=''
         if [ -e /boot/grub2/grub.cfg ]; then
             output=/boot/grub2/grub.cfg
         else
             output=/boot/grub/grub.cfg
         fi
-        grub-mkconfig -o "$output"
+        "$mkconfig" -o "$output"
     else
         die 'Neither update-grub nor grub-mkconfig is available'
     fi
@@ -707,12 +739,9 @@ cleanup_stage() (
     fi
     # Drop the one-shot selection too, otherwise grubenv keeps pointing at an
     # entry that no longer exists after the regeneration below.
-    for candidate in grub-editenv grub2-editenv; do
-        if command -v "$candidate" >/dev/null 2>&1; then
-            "$candidate" - unset next_entry >/dev/null 2>&1 || true
-            break
-        fi
-    done
+    if editenv=$(grub_tool editenv); then
+        "$editenv" - unset next_entry >/dev/null 2>&1 || true
+    fi
 
     if [ "$changed" = true ]; then
         update_grub_config
@@ -789,7 +818,8 @@ stage_main() (
     need_cmd base64
     need_cmd curl
     need_cmd findmnt
-    need_cmd grub-install
+    grub_tool install >/dev/null ||
+        die 'Required command not found: grub-install (or grub2-install)'
     need_cmd ip
     need_cmd lsblk
     need_cmd mountpoint
@@ -1083,12 +1113,14 @@ menuentry 'Arch Linux network reinstall (ERASES TARGET DISK)' --id archi {
 EOF
     chmod 0755 "$GRUB_ENTRY_FILE"
 
-    mkdir -p -- "$(dirname "$GRUB_DEFAULT_FILE")"
+    if grub_reads_default_dir; then
+        mkdir -p -- "$(dirname "$GRUB_DEFAULT_FILE")"
 cat > "$GRUB_DEFAULT_FILE" <<EOF
 # Temporary settings used by archi.sh. Remove with: archi.sh --cleanup
 GRUB_TIMEOUT=$grub_timeout
 GRUB_TIMEOUT_STYLE=menu
 EOF
+    fi
 
     update_grub_config
     generated_grub=''
@@ -1100,19 +1132,15 @@ EOF
     # would keep winning after a failed or held run, so every later reboot would
     # re-enter Alpine and erase the disk again; one-shot falls back to the
     # system that is already installed.
-    grub_reboot=''
-    for candidate in grub-reboot grub2-reboot; do
-        if command -v "$candidate" >/dev/null 2>&1; then
-            grub_reboot=$candidate
-            break
-        fi
-    done
+    grub_reboot=$(grub_tool reboot) || grub_reboot=''
     if [ -n "$grub_reboot" ] && "$grub_reboot" archi >/dev/null 2>&1; then
         log "Reinstall entry selected for the next boot only, via $grub_reboot"
-    else
+    elif grub_reads_default_dir; then
         printf 'GRUB_DEFAULT=archi\n' >> "$GRUB_DEFAULT_FILE"
         update_grub_config
         warn 'grub-reboot is unavailable; the reinstall entry stays the default until --cleanup'
+    else
+        die 'Cannot select the reinstall entry: grub-reboot failed and this GRUB ignores /etc/default/grub.d'
     fi
 
     sync
@@ -1148,8 +1176,16 @@ partition_path() (
 
 setup_installer_logging() {
     INSTALLER_LOG_FILE=$1
-    INSTALLER_LOG_PIPE=/tmp/archi-install-log.$$
+    INSTALLER_LOG_PIPE=''
     INSTALLER_TEE_PID=''
+    # Mirroring through tee only earns its keep when someone is watching a
+    # terminal. Started from archi-init stdout is already the log file, and
+    # teeing would then write every line to it twice.
+    if [ ! -t 1 ]; then
+        exec >>"$INSTALLER_LOG_FILE" 2>&1
+        return 0
+    fi
+    INSTALLER_LOG_PIPE=/tmp/archi-install-log.$$
     rm -f -- "$INSTALLER_LOG_PIPE"
     mkfifo "$INSTALLER_LOG_PIPE"
     exec 3>&1 4>&2
@@ -1167,8 +1203,8 @@ installer_exit() {
         /usr/sbin/sshd >/dev/null 2>&1 || true
         sync
     fi
-    exec 1>&3 2>&4 3>&- 4>&-
     if [ -n "${INSTALLER_TEE_PID:-}" ]; then
+        exec 1>&3 2>&4 3>&- 4>&-
         wait "$INSTALLER_TEE_PID" || true
     fi
     rm -f -- "${INSTALLER_LOG_PIPE:-}"
