@@ -14,7 +14,7 @@ curl -fsSLo /tmp/archi.sh https://raw.githubusercontent.com/hyird/archi-reinstal
 sh /tmp/archi.sh --authorized-key /root/.ssh/authorized_keys
 ```
 
-必须提供 `--authorized-key` 或 `--password`。两者同时提供时禁用 SSH 密码登录，仅允许公钥登录。
+必须提供 `--authorized-key` 或 `--password`。两者同时提供时禁用 SSH 密码登录，仅允许公钥登录。Alpine 临时环境和目标系统都会按同样规则应用到 `root` 账号。
 
 ## 常用选项
 
@@ -29,9 +29,9 @@ sh /tmp/archi.sh --authorized-key /root/.ssh/authorized_keys
 | `--gateway 192.0.2.1` | 继承当前配置 | 设置 IPv4 网关 |
 | `--dns 1.1.1.1` | `1.1.1.1` | 设置 DNS 服务器 |
 | `--ssh-port 22` | `22` | 设置 SSH 端口 |
-| `--ethx` | 关闭 | 使用 `eth0` 风格网卡名 |
+| `--no-ethx` | `eth0` 命名已开启 | 保留 `ens3` 之类的可预测网卡名 |
 | `--install "git htop"` | — | 安装额外官方仓库软件包 |
-| `--bbr` | 关闭 | 启用 BBR 和高并发网络参数 |
+| `--no-bbr` | BBR 已开启 | 不启用 BBR 和高并发网络参数 |
 | `--no-fail2ban` | Fail2ban 已开启 | 不安装 Fail2ban 与 nftables SSH 防护 |
 | `--swap-mib 1024` | `0` | 创建 1024 MiB swap 文件 |
 | `--mirror https://mirrors.cloud.tencent.com/archlinux` | Arch 官方镜像 | 设置 Arch 镜像根地址 |
@@ -53,10 +53,10 @@ sh /tmp/archi.sh --help
 sh /tmp/archi.sh --disk /dev/vda --authorized-key https://github.com/hyird.keys
 ```
 
-使用腾讯云镜像并启用 BBR：
+使用腾讯云镜像：
 
 ```sh
-sh /tmp/archi.sh --tencent --dns 1.1.1.1 --bbr --authorized-key /root/.ssh/authorized_keys
+sh /tmp/archi.sh --tencent --dns 1.1.1.1 --authorized-key /root/.ssh/authorized_keys
 ```
 
 手动设置 Arch 镜像：
@@ -73,12 +73,19 @@ sh /tmp/archi.sh --dry-run --password 'Archi-2026!'
 
 ## 安装进度
 
-重启进入 Alpine 后，可以使用配置的 root 凭据连接服务器并查看日志：
+重启进入 Alpine 后，直接使用配置的 root 凭据连接服务器，默认会自动跟随安装日志：
 
 ```sh
 ssh root@192.0.2.10
+```
+
+如需手动查看，可运行：
+
+```sh
 tail -f /tmp/archi-install.log
 ```
+
+Alpine 临时环境也会在 VGA 控制台和串口上提供登录提示，因此云厂商的 VNC 界面显示的是正常的 Alpine 登录界面，登录后按提示查看日志即可。安装过程不会向控制台刷屏。
 
 使用 `--hold` 时不会擦盘。确认后在 Alpine 中继续：
 
@@ -95,6 +102,8 @@ ARCHI_FORCE_INSTALL=1 /root/archi.sh
 ```sh
 sh /tmp/archi.sh --cleanup
 ```
+
+重装入口只对**下一次启动**生效（通过 `grub-reboot` 设置），不会成为持久的默认项。因此安装失败或使用 `--hold` 后再次重启，会回到原有系统而不是重新进入 Alpine 擦盘。
 
 ## 要求与限制
 

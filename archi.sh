@@ -13,7 +13,7 @@ umask 077
 # Functions use POSIX subshell bodies where variable isolation is required.
 
 readonly ARCHI_PAYLOAD_ID='archi-network-reinstall-v1'
-readonly ARCHI_VERSION='0.9.0'
+readonly ARCHI_VERSION='0.9.3'
 readonly ARCHI_RAW_URL='https://raw.githubusercontent.com/hyird/archi-reinstall/main/archi.sh'
 ARCHI_SOURCE_FILE=$0
 readonly DEFAULT_ALPINE_MIRROR='https://dl-cdn.alpinelinux.org/alpine'
@@ -62,8 +62,8 @@ Options:
   --dns 1.1.1.1                DNS servers (default: 1.1.1.1).
   --ssh-port 22                SSH port (default: 22).
   --install "git htop"         Install extra official packages.
-  --ethx                       Use eth0-style interface names.
-  --bbr                        Enable TCP BBR.
+  --no-ethx                    Keep predictable interface names instead of eth0.
+  --no-bbr                     Do not enable TCP BBR.
   --no-fail2ban                Do not install the default SSH jail.
   --swap-mib 1024              Swap file size in MiB (default: 0, disabled).
   --mirror https://mirrors.cloud.tencent.com/archlinux
@@ -451,7 +451,6 @@ EOF
     cat > "$apkovl/root/archi-init" <<'EOF'
 #!/bin/sh
 set +e
-echo '[archi] Alpine installer init started.' >/dev/console
 hostname alpine
 mkdir -p /run/sshd /tmp /var/empty
 ln -sfn /proc/self/fd /dev/fd
@@ -459,6 +458,35 @@ ln -sfn /proc/self/fd/0 /dev/stdin
 ln -sfn /proc/self/fd/1 /dev/stdout
 ln -sfn /proc/self/fd/2 /dev/stderr
 ln -sfn /proc/mounts /etc/mtab
+# Nothing below writes to /dev/console: the consoles belong to the getty logins
+# started further down, and anything printed underneath a waiting getty makes it
+# bail out and reprint its prompt. Progress lives in the logs instead, which is
+# what /etc/motd and /root/.profile point at.
+exec >>/tmp/archi-init.log 2>&1
+echo '[archi] Alpine installer init started.'
+cat > /etc/motd <<'MOTD'
+
+Arch Linux is being installed from this Alpine environment.
+Follow the installation log with:
+
+    tail -f /tmp/archi-install.log
+
+MOTD
+# init=/root/archi-init replaces Alpine's init, so /etc/inittab is never read and
+# nothing spawns a getty. Start one per usable console ourselves, and do it early
+# so the screen -- including a cloud VNC view of it -- offers a login even when a
+# later step fails.
+dmesg -n 1
+for archi_tty in tty1 ttyS0 ttyAMA0; do
+    [ -c "/dev/$archi_tty" ] || continue
+    stty -g -F "/dev/$archi_tty" >/dev/null 2>&1 || continue
+    case $archi_tty in
+        ttyS0 | ttyAMA0) archi_baud=115200 ;;
+        *) archi_baud=0 ;;
+    esac
+    setsid sh -c "while :; do /sbin/getty -L $archi_baud $archi_tty vt100; sleep 2; done" \
+        </dev/null >/dev/null 2>&1 &
+done
 apk del alpine-base alpine-conf >/tmp/archi-apk-remove.log 2>&1
 apk_rc=1
 apk_attempt=1
@@ -470,12 +498,12 @@ while [ "$apk_attempt" -le 3 ]; do
         apk_rc=0
         break
     fi
-    echo "[archi] APK attempt $apk_attempt/3 failed; retrying." >/dev/console
+    echo "[archi] APK attempt $apk_attempt/3 failed; retrying."
     apk_attempt=$((apk_attempt + 1))
     sleep 3
 done
-echo "[archi] required APK exit status: $apk_rc" >/dev/console
-[ "$apk_rc" -eq 0 ] || cat /tmp/archi-apk.log >/dev/console
+echo "[archi] required APK exit status: $apk_rc"
+[ "$apk_rc" -eq 0 ] || cat /tmp/archi-apk.log
 mkdir -p /.modloop /lib
 curl --fail --location --retry 5 --retry-all-errors --retry-delay 2 \
     --connect-timeout 10 --output /tmp/modloop-virt \
@@ -489,30 +517,50 @@ if [ "$modloop_rc" -eq 0 ]; then
     done
     mdev -s >/dev/null 2>&1 || true
 else
-    echo "[archi] modloop download failed with status $modloop_rc" >/dev/console
-    cat /tmp/archi-modloop.log >/dev/console
+    echo "[archi] modloop download failed with status $modloop_rc"
+    cat /tmp/archi-modloop.log
 fi
 ssh-keygen -A >/tmp/archi-ssh-keygen.log 2>&1
 ssh_keygen_rc=$?
-echo "[archi] ssh-keygen exit status: $ssh_keygen_rc" >/dev/console
-[ "$ssh_keygen_rc" -eq 0 ] || cat /tmp/archi-ssh-keygen.log >/dev/console
+echo "[archi] ssh-keygen exit status: $ssh_keygen_rc"
+[ "$ssh_keygen_rc" -eq 0 ] || cat /tmp/archi-ssh-keygen.log
 /usr/sbin/sshd -E /tmp/archi-sshd.log
 sshd_rc=$?
-echo "[archi] sshd exit status: $sshd_rc" >/dev/console
-[ "$sshd_rc" -eq 0 ] || cat /tmp/archi-sshd.log >/dev/console
-echo '[archi] SSH should be ready. Follow installation with: tail -f /tmp/archi-install.log' >/dev/console
-/root/archi.sh </dev/console >/dev/console 2>&1 &
+echo "[archi] sshd exit status: $sshd_rc"
+[ "$sshd_rc" -eq 0 ] || cat /tmp/archi-sshd.log
+echo '[archi] SSH should be ready. Follow installation with: tail -f /tmp/archi-install.log'
+/root/archi.sh </dev/null >>/tmp/archi-init.log 2>&1 &
 installer_pid=$!
 while :; do
     if ! kill -0 "$installer_pid" 2>/dev/null; then
         wait "$installer_pid"
         installer_rc=$?
-        echo "[archi] Installer exited with status $installer_rc; Alpine remains online." >/dev/console
+        echo "[archi] Installer exited with status $installer_rc; Alpine remains online."
         installer_pid=0
     fi
     sleep 5 &
     wait $!
 done
+EOF
+    cat > "$apkovl/root/.profile" <<'EOF'
+if [ -n "${SSH_CONNECTION-}" ] && [ -t 1 ]; then
+    echo
+    echo '[archi] Logged in to Alpine installer as root.'
+    echo '[archi] Installation progress follows /tmp/archi-install.log.'
+    echo '[archi] Press Ctrl-C to get a shell.'
+    install_wait=0
+    while [ ! -f /tmp/archi-install.log ] && [ "$install_wait" -lt 15 ]; do
+        sleep 1
+        install_wait=$((install_wait + 1))
+    done
+
+    if [ -f /tmp/archi-install.log ]; then
+        tail -n 80 -f /tmp/archi-install.log
+    else
+        echo "[archi] Waiting for installer log. Run: tail -f /tmp/archi-install.log"
+    fi
+    echo
+fi
 EOF
     chmod 0700 "$apkovl/root/archi-init"
     find "$apkovl" -type d -exec chmod 0755 {} +
@@ -521,6 +569,7 @@ EOF
     if [ -e "$apkovl/root/.ssh/authorized_keys" ]; then
         chmod 0600 "$apkovl/root/.ssh/authorized_keys"
     fi
+    chmod 0600 "$apkovl/root/.profile"
     chmod 0600 "$apkovl/etc/shadow"
     chmod 0644 "$apkovl/etc/hostname" "$apkovl/etc/resolv.conf" \
         "$apkovl/etc/passwd" "$apkovl/etc/group" "$apkovl/etc/apk/repositories" \
@@ -656,6 +705,15 @@ cleanup_stage() (
         rm -rf -- "$install_dir"
         changed=true
     fi
+    # Drop the one-shot selection too, otherwise grubenv keeps pointing at an
+    # entry that no longer exists after the regeneration below.
+    for candidate in grub-editenv grub2-editenv; do
+        if command -v "$candidate" >/dev/null 2>&1; then
+            "$candidate" - unset next_entry >/dev/null 2>&1 || true
+            break
+        fi
+    done
+
     if [ "$changed" = true ]; then
         update_grub_config
         log 'Arch reinstall staging files were removed and GRUB was regenerated'
@@ -678,7 +736,7 @@ stage_main() (
     requested_ip=''
     requested_gateway=''
     ssh_port=22
-    bbr=false fail2ban=true firmware=false ethx=false
+    bbr=true fail2ban=true firmware=false ethx=true
     kernel='linux-lts'
     extra_packages=''
     swap_mib=0
@@ -706,8 +764,10 @@ stage_main() (
             --dns) dns=${2:?missing value}; shift 2 ;;
             --ssh-port) ssh_port=${2:?missing value}; shift 2 ;;
             --bbr) bbr=true; shift ;;
+            --no-bbr) bbr=false; shift ;;
             --no-fail2ban) fail2ban=false; shift ;;
             --ethx) ethx=true; shift ;;
+            --no-ethx) ethx=false; shift ;;
             --install) extra_packages=${2:?missing value}; shift 2 ;;
             --swap-mib) swap_mib=${2:?missing value}; shift 2 ;;
             --hold) hold=true; shift ;;
@@ -1025,8 +1085,7 @@ EOF
 
     mkdir -p -- "$(dirname "$GRUB_DEFAULT_FILE")"
 cat > "$GRUB_DEFAULT_FILE" <<EOF
-# Temporary default used by archi.sh. Remove with: archi.sh --cleanup
-GRUB_DEFAULT=archi
+# Temporary settings used by archi.sh. Remove with: archi.sh --cleanup
 GRUB_TIMEOUT=$grub_timeout
 GRUB_TIMEOUT_STYLE=menu
 EOF
@@ -1037,11 +1096,46 @@ EOF
     grep -q "menuentry 'Arch Linux network reinstall" "$generated_grub" ||
         die 'GRUB regeneration completed but the Arch reinstall entry is missing'
 
+    # Select the entry for the next boot only. As a persistent GRUB_DEFAULT it
+    # would keep winning after a failed or held run, so every later reboot would
+    # re-enter Alpine and erase the disk again; one-shot falls back to the
+    # system that is already installed.
+    grub_reboot=''
+    for candidate in grub-reboot grub2-reboot; do
+        if command -v "$candidate" >/dev/null 2>&1; then
+            grub_reboot=$candidate
+            break
+        fi
+    done
+    if [ -n "$grub_reboot" ] && "$grub_reboot" archi >/dev/null 2>&1; then
+        log "Reinstall entry selected for the next boot only, via $grub_reboot"
+    else
+        printf 'GRUB_DEFAULT=archi\n' >> "$GRUB_DEFAULT_FILE"
+        update_grub_config
+        warn 'grub-reboot is unavailable; the reinstall entry stays the default until --cleanup'
+    fi
+
     sync
     log 'Arch reinstall entry is staged successfully'
     log 'It remains reversible until reboot: archi.sh --cleanup'
     log 'Rebooting into Alpine; the selected disk will be erased'
-    systemctl reboot
+    # systemd denies the request while logind is still starting up, and some
+    # minimal images do not run systemd at all. Falling back matters here: by
+    # this point everything is staged, so giving up would strand the machine
+    # one reboot short of the install with set -e reporting a bare failure.
+    # A successful request takes the machine down during the wait, so a generous
+    # window costs nothing here and avoids forcing a reboot underneath a clean
+    # shutdown that is merely slow.
+    if systemctl reboot 2>/dev/null; then
+        sleep 120
+    fi
+    log 'Reboot request did not take effect; retrying with reboot(8)'
+    if reboot 2>/dev/null; then
+        sleep 30
+    fi
+    log 'Still running; forcing an immediate reboot'
+    sync
+    reboot -f
 )
 
 partition_path() (
