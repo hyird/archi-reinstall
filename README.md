@@ -105,6 +105,8 @@ sh /tmp/archi.sh --cleanup
 
 重装入口只对**下一次启动**生效（通过 `grub-reboot` 设置），不会成为持久的默认项。因此安装失败或使用 `--hold` 后再次重启，会回到原有系统而不是重新进入 Alpine 擦盘。
 
+入口以 `custom.cfg` 的形式写在 grub.cfg 同目录下，**不会重新生成现有的 grub.cfg**。若该目录下原本已有 `custom.cfg`，会先备份为 `custom.cfg.archi-orig`，`--cleanup` 时还原。
+
 ## 要求与限制
 
 - 仅支持 x86_64、GRUB 2、有线 IPv4、BIOS 或 UEFI

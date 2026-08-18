@@ -13,7 +13,7 @@ umask 077
 # Functions use POSIX subshell bodies where variable isolation is required.
 
 readonly ARCHI_PAYLOAD_ID='archi-network-reinstall-v1'
-readonly ARCHI_VERSION='0.9.4'
+readonly ARCHI_VERSION='0.10.0'
 readonly ARCHI_RAW_URL='https://raw.githubusercontent.com/hyird/archi-reinstall/main/archi.sh'
 ARCHI_SOURCE_FILE=$0
 readonly DEFAULT_ALPINE_MIRROR='https://dl-cdn.alpinelinux.org/alpine'
@@ -28,6 +28,8 @@ readonly ALIYUN_PACKAGE_MIRROR="https://mirrors.aliyun.com/archlinux/\$repo/os/\
 readonly TENCENT_ALPINE_MIRROR='https://mirrors.cloud.tencent.com/alpine'
 readonly TENCENT_PACKAGE_MIRROR="https://mirrors.cloud.tencent.com/archlinux/\$repo/os/\$arch"
 readonly DEFAULT_INSTALL_DIR='/boot/archi-reinstall'
+# Legacy staging paths, still removed by --cleanup so that an entry staged by an
+# older version can be undone by a newer one.
 readonly GRUB_ENTRY_FILE='/etc/grub.d/42_archi_reinstall'
 readonly GRUB_DEFAULT_FILE='/etc/default/grub.d/zz-archi-reinstall.cfg'
 
@@ -671,11 +673,23 @@ grub_tool() (
     return 1
 )
 
-# Debian and Ubuntu patch grub-mkconfig to source /etc/default/grub.d/*.cfg.
-# Red Hat derivatives do not, so a drop-in there would be silently ignored.
-grub_reads_default_dir() (
-    mkconfig=$(grub_tool mkconfig) || return 1
-    grep -q 'default/grub\.d' "$(command -v "$mkconfig")" 2>/dev/null
+# The grub.cfg GRUB actually reads is the one carrying the boot entries. Copies
+# under the EFI directory are stubs that chain to it, and Debian keeps its under
+# /boot/grub while Red Hat derivatives use /boot/grub2.
+find_grub_cfg() (
+    for candidate in /boot/grub/grub.cfg /boot/grub2/grub.cfg /boot/efi/EFI/*/grub.cfg; do
+        [ -f "$candidate" ] || continue
+        LC_ALL=C grep -qE '^[[:space:]]*(menuentry|blscfg)' "$candidate" || continue
+        printf '%s\n' "$candidate"
+        return 0
+    done
+    return 1
+)
+
+# Every grub.cfg grub-mkconfig produces ends by sourcing custom.cfg from its own
+# directory, which is how the entry gets added without regenerating anything.
+grub_cfg_reads_custom() (
+    LC_ALL=C grep -q 'custom\.cfg' "$1"
 )
 
 update_grub_config() (
@@ -709,21 +723,37 @@ safe_install_dir() (
 )
 
 cleanup_stage() (
-    install_dir=$1 changed=false
+    install_dir=$1 changed=false regenerate=false grub_cfg='' custom_cfg='' editenv=''
     [ "$(id -u)" -eq 0 ] || die '--cleanup requires root'
     safe_install_dir "$install_dir"
 
+    if grub_cfg=$(find_grub_cfg); then
+        custom_cfg="$(dirname "$grub_cfg")/custom.cfg"
+        if [ -e "$custom_cfg" ] &&
+            LC_ALL=C grep -q "ARCHI_PAYLOAD_ID=$ARCHI_PAYLOAD_ID" "$custom_cfg"; then
+            if [ -e "$custom_cfg.archi-orig" ]; then
+                mv -f -- "$custom_cfg.archi-orig" "$custom_cfg"
+                log "Restored the previous $custom_cfg"
+            else
+                rm -f -- "$custom_cfg"
+            fi
+            changed=true
+        fi
+    fi
+
+    # Written by versions that staged through /etc/grub.d; removing those does
+    # require a regeneration, unlike custom.cfg.
     if [ -e "$GRUB_ENTRY_FILE" ]; then
         grep -q 'ARCHI_PAYLOAD_ID=archi-network-reinstall-v1' "$GRUB_ENTRY_FILE" ||
             die "Refusing to remove an unrecognized file: $GRUB_ENTRY_FILE"
         rm -f -- "$GRUB_ENTRY_FILE"
-        changed=true
+        changed=true regenerate=true
     fi
     if [ -e "$GRUB_DEFAULT_FILE" ]; then
         grep -q 'archi' "$GRUB_DEFAULT_FILE" ||
             die "Refusing to remove an unrecognized file: $GRUB_DEFAULT_FILE"
         rm -f -- "$GRUB_DEFAULT_FILE"
-        changed=true
+        changed=true regenerate=true
     fi
     if [ -e "$install_dir" ]; then
         if { [ -f "$install_dir/.archi-owned" ] &&
@@ -738,14 +768,17 @@ cleanup_stage() (
         changed=true
     fi
     # Drop the one-shot selection too, otherwise grubenv keeps pointing at an
-    # entry that no longer exists after the regeneration below.
+    # entry that no longer exists.
     if editenv=$(grub_tool editenv); then
         "$editenv" - unset next_entry >/dev/null 2>&1 || true
     fi
 
-    if [ "$changed" = true ]; then
+    if [ "$regenerate" = true ]; then
         update_grub_config
         log 'Arch reinstall staging files were removed and GRUB was regenerated'
+    elif [ "$changed" = true ]; then
+        sync
+        log 'Arch reinstall staging files were removed'
     else
         log 'No Arch reinstall staging files were present'
     fi
@@ -818,8 +851,11 @@ stage_main() (
     need_cmd base64
     need_cmd curl
     need_cmd findmnt
-    grub_tool install >/dev/null ||
-        die 'Required command not found: grub-install (or grub2-install)'
+    # What staging actually depends on: the entry is added through custom.cfg
+    # and selected for one boot with grub-reboot. Nothing is regenerated, so
+    # grub-install and grub-mkconfig are not needed here.
+    grub_tool reboot >/dev/null ||
+        die 'Required command not found: grub-reboot (or grub2-reboot)'
     need_cmd ip
     need_cmd lsblk
     need_cmd mountpoint
@@ -1099,49 +1135,49 @@ kernel_sha256=$(sha256_file "$install_dir/vmlinuz-virt")
 initramfs_sha256=$(sha256_file "$install_dir/initramfs-virt")
 EOF
 
-    cat > "$GRUB_ENTRY_FILE" <<EOF
-#!/bin/sh
-# ARCHI_PAYLOAD_ID=archi-network-reinstall-v1
-exec tail -n +4 \$0
+    # Append the entry through custom.cfg instead of adding a /etc/grub.d script
+    # and regenerating. Regeneration rewrites the whole boot configuration of a
+    # machine that is still in service, picking up every unrelated change made
+    # since it was last run, and it fails outright when something like os-prober
+    # errors out. Sourcing custom.cfg is part of the grub.cfg already on disk, so
+    # nothing else has to be touched.
+    grub_cfg=$(find_grub_cfg) ||
+        die 'Could not find a grub.cfg containing boot entries'
+    grub_cfg_reads_custom "$grub_cfg" ||
+        die "This GRUB configuration does not source custom.cfg: $grub_cfg"
+    custom_cfg="$(dirname "$grub_cfg")/custom.cfg"
+    # Keep whatever the administrator already had there; --cleanup puts it back.
+    if [ -e "$custom_cfg" ] &&
+        ! LC_ALL=C grep -q "ARCHI_PAYLOAD_ID=$ARCHI_PAYLOAD_ID" "$custom_cfg"; then
+        [ -e "$custom_cfg.archi-orig" ] ||
+            cp -p -- "$custom_cfg" "$custom_cfg.archi-orig"
+        log "Existing custom.cfg saved as $custom_cfg.archi-orig"
+    fi
+
+cat > "$custom_cfg" <<EOF
+# ARCHI_PAYLOAD_ID=$ARCHI_PAYLOAD_ID
+# Written by archi.sh. Remove with: archi.sh --cleanup
 menuentry 'Arch Linux network reinstall (ERASES TARGET DISK)' --id archi {
     insmod part_gpt
     insmod part_msdos
     insmod ext2
+    search --no-floppy --file --set=root $grub_kernel
     linux $grub_kernel modules=loop,squashfs,sd_mod,usb_storage,virtio_scsi,virtio_blk alpine_repo=$alpine_mirror/latest-stable/main,$alpine_mirror/latest-stable/community apkovl=/archi.apkovl.tar.gz init=/root/archi-init $boot_network archi_mode=install archi_payload_sha256=$payload_sha archi_disk_b64=$disk_b64 archi_hostname_b64=$hostname_b64 archi_timezone_b64=$timezone_b64 archi_dns_b64=$dns_b64 archi_key_b64=$key_b64 archi_password_hash_b64=$password_hash_b64 archi_package_mirror_b64=$package_mirror_b64 archi_extra_packages_b64=$extra_packages_b64 archi_kernel_b64=$kernel_b64 archi_ntp_b64=$ntp_b64 archi_boot_mode=$boot_mode archi_swap_mib=$swap_mib archi_hold=$hold_flag archi_boot_cidr=$boot_cidr archi_gateway=$boot_gateway archi_boot_mac=$boot_mac archi_ssh_port=$ssh_port archi_bbr=$bbr archi_fail2ban=$fail2ban archi_firmware=$firmware archi_ethx=$ethx archi_grub_timeout=$grub_timeout
     initrd $grub_initramfs
 }
 EOF
-    chmod 0755 "$GRUB_ENTRY_FILE"
-
-    if grub_reads_default_dir; then
-        mkdir -p -- "$(dirname "$GRUB_DEFAULT_FILE")"
-cat > "$GRUB_DEFAULT_FILE" <<EOF
-# Temporary settings used by archi.sh. Remove with: archi.sh --cleanup
-GRUB_TIMEOUT=$grub_timeout
-GRUB_TIMEOUT_STYLE=menu
-EOF
-    fi
-
-    update_grub_config
-    generated_grub=''
-    if [ -e /boot/grub2/grub.cfg ]; then generated_grub=/boot/grub2/grub.cfg; else generated_grub=/boot/grub/grub.cfg; fi
-    grep -q "menuentry 'Arch Linux network reinstall" "$generated_grub" ||
-        die 'GRUB regeneration completed but the Arch reinstall entry is missing'
+    chmod 0644 "$custom_cfg"
+    log "Reinstall entry written to $custom_cfg"
 
     # Select the entry for the next boot only. As a persistent GRUB_DEFAULT it
     # would keep winning after a failed or held run, so every later reboot would
     # re-enter Alpine and erase the disk again; one-shot falls back to the
     # system that is already installed.
-    grub_reboot=$(grub_tool reboot) || grub_reboot=''
-    if [ -n "$grub_reboot" ] && "$grub_reboot" archi >/dev/null 2>&1; then
-        log "Reinstall entry selected for the next boot only, via $grub_reboot"
-    elif grub_reads_default_dir; then
-        printf 'GRUB_DEFAULT=archi\n' >> "$GRUB_DEFAULT_FILE"
-        update_grub_config
-        warn 'grub-reboot is unavailable; the reinstall entry stays the default until --cleanup'
-    else
-        die 'Cannot select the reinstall entry: grub-reboot failed and this GRUB ignores /etc/default/grub.d'
-    fi
+    grub_reboot=$(grub_tool reboot) ||
+        die 'Required command not found: grub-reboot (or grub2-reboot)'
+    "$grub_reboot" archi >/dev/null 2>&1 ||
+        die "Could not select the reinstall entry for the next boot: $grub_reboot archi"
+    log "Reinstall entry selected for the next boot only, via $grub_reboot"
 
     sync
     log 'Arch reinstall entry is staged successfully'
