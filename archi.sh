@@ -529,24 +529,24 @@ EOF
     cp -f -- "$config_file" "$apkovl/etc/archi/config"
     : > "$apkovl/etc/.default_boot_services"
     printf '%s\n' "$hostname" > "$apkovl/etc/hostname"
-    cat > "$apkovl/etc/passwd" <<'EOF'
-root:x:0:0:root:/root:/bin/ash
-sshd:x:22:22:sshd:/var/empty:/sbin/nologin
-EOF
-    cat > "$apkovl/etc/group" <<'EOF'
-root:x:0:root
-wheel:x:10:root
-sshd:x:22:
-EOF
+    {
+        printf 'root:x:0:0:root:/root:/bin/ash\n'
+        printf 'sshd:x:22:22:sshd:/var/empty:/sbin/nologin\n'
+    } > "$apkovl/etc/passwd"
+    {
+        printf 'root:x:0:root\n'
+        printf 'wheel:x:10:root\n'
+        printf 'sshd:x:22:\n'
+    } > "$apkovl/etc/group"
     printf 'root:%s:%s:0:99999:7:::\n' "$shadow_password" "$shadow_last_change" > "$apkovl/etc/shadow"
     : > "$apkovl/etc/resolv.conf"
     for dns_server in $dns; do
         printf 'nameserver %s\n' "$dns_server" >> "$apkovl/etc/resolv.conf"
     done
-    cat > "$apkovl/etc/apk/repositories" <<EOF
-$alpine_mirror/latest-stable/main
-$alpine_mirror/latest-stable/community
-EOF
+    {
+        printf '%s/latest-stable/main\n' "$alpine_mirror"
+        printf '%s/latest-stable/community\n' "$alpine_mirror"
+    } > "$apkovl/etc/apk/repositories"
     printf '%s\n' \
         "$alpine_mirror/latest-stable/releases/x86_64/netboot/modloop-virt" \
         > "$apkovl/etc/archi/modloop-url"
@@ -1749,19 +1749,19 @@ EOF
     arch-chroot /mnt locale-gen
     printf 'LANG=en_US.UTF-8\n' > /mnt/etc/locale.conf
     printf '%s\n' "$hostname" > /mnt/etc/hostname
-    cat > /mnt/etc/hosts <<EOF
-127.0.0.1 localhost
-::1 localhost
-127.0.1.1 $hostname
-EOF
+    {
+        printf '127.0.0.1 localhost\n'
+        printf '::1 localhost\n'
+        printf '127.0.1.1 %s\n' "$hostname"
+    } > /mnt/etc/hosts
     chmod 0644 /mnt/etc/locale.conf /mnt/etc/hostname /mnt/etc/hosts
 
     install -d -m 0755 /mnt/etc/modprobe.d
-    cat > /mnt/etc/modprobe.d/60-archi-cloud.conf <<'EOF'
-# archi.sh supports wired cloud networking only. Avoid loading the wireless
-# regulatory stack and its firmware database on machines without Wi-Fi.
-blacklist cfg80211
-EOF
+    {
+        printf '# archi.sh supports wired cloud networking only. Avoid loading the wireless\n'
+        printf '# regulatory stack and its firmware database on machines without Wi-Fi.\n'
+        printf 'blacklist cfg80211\n'
+    } > /mnt/etc/modprobe.d/60-archi-cloud.conf
     chmod 0644 /mnt/etc/modprobe.d/60-archi-cloud.conf
 
     if [ "$log_days" -gt 0 ]; then
@@ -1780,51 +1780,51 @@ EOF
     fi
 
     install -d -m 0755 /mnt/etc/systemd/timesyncd.conf.d
-    cat > /mnt/etc/systemd/timesyncd.conf.d/60-archi-cloud.conf <<EOF
-[Time]
-NTP=$ntp
-FallbackNTP=time.cloudflare.com time.google.com
-EOF
+    {
+        printf '[Time]\n'
+        printf 'NTP=%s\n' "$ntp"
+        printf 'FallbackNTP=time.cloudflare.com time.google.com\n'
+    } > /mnt/etc/systemd/timesyncd.conf.d/60-archi-cloud.conf
     chmod 0644 /mnt/etc/systemd/timesyncd.conf.d/60-archi-cloud.conf
 
     if [ "$bbr" = true ]; then
         install -d -m 0755 /mnt/etc/sysctl.d
-        cat > /mnt/etc/sysctl.d/99-archi-bbr.conf <<EOF
-net.core.default_qdisc = fq
-net.core.somaxconn = 16384
-net.ipv4.ip_local_port_range = 10240 65535
-net.ipv4.tcp_congestion_control = bbr
-net.ipv4.tcp_max_syn_backlog = 16384
-net.ipv4.tcp_mtu_probing = 1
-net.ipv4.tcp_rfc1337 = 1
-net.ipv4.tcp_slow_start_after_idle = 0
-net.ipv4.tcp_syncookies = 1
-EOF
+        {
+            printf 'net.core.default_qdisc = fq\n'
+            printf 'net.core.somaxconn = 16384\n'
+            printf 'net.ipv4.ip_local_port_range = 10240 65535\n'
+            printf 'net.ipv4.tcp_congestion_control = bbr\n'
+            printf 'net.ipv4.tcp_max_syn_backlog = 16384\n'
+            printf 'net.ipv4.tcp_mtu_probing = 1\n'
+            printf 'net.ipv4.tcp_rfc1337 = 1\n'
+            printf 'net.ipv4.tcp_slow_start_after_idle = 0\n'
+            printf 'net.ipv4.tcp_syncookies = 1\n'
+        } > /mnt/etc/sysctl.d/99-archi-bbr.conf
         chmod 0644 /mnt/etc/sysctl.d/99-archi-bbr.conf
     fi
 
     install -d -m 0755 /mnt/etc/systemd/network
     if [ -n "$boot_cidr" ] && [ -n "$boot_gateway" ] && [ -n "$boot_mac" ]; then
-        cat > /mnt/etc/systemd/network/20-wired.network <<EOF
-[Match]
-MACAddress=$boot_mac
-
-[Network]
-Address=$boot_cidr
-Gateway=$boot_gateway
-IPv6AcceptRA=yes
-${dns:+DNS=$dns}
-EOF
+        {
+            printf '[Match]\n'
+            printf 'MACAddress=%s\n' "$boot_mac"
+            printf '\n'
+            printf '[Network]\n'
+            printf 'Address=%s\n' "$boot_cidr"
+            printf 'Gateway=%s\n' "$boot_gateway"
+            printf 'IPv6AcceptRA=yes\n'
+            printf '%s\n' "${dns:+DNS=$dns}"
+        } > /mnt/etc/systemd/network/20-wired.network
     else
-        cat > /mnt/etc/systemd/network/20-wired.network <<EOF
-[Match]
-Type=ether
-
-[Network]
-DHCP=yes
-IPv6AcceptRA=yes
-${dns:+DNS=$dns}
-EOF
+        {
+            printf '[Match]\n'
+            printf 'Type=ether\n'
+            printf '\n'
+            printf '[Network]\n'
+            printf 'DHCP=yes\n'
+            printf 'IPv6AcceptRA=yes\n'
+            printf '%s\n' "${dns:+DNS=$dns}"
+        } > /mnt/etc/systemd/network/20-wired.network
     fi
     chmod 0644 /mnt/etc/systemd/network/20-wired.network
     arch-chroot /mnt systemctl enable systemd-networkd.service systemd-resolved.service \
@@ -1846,20 +1846,20 @@ EOF
 
     if [ "$fail2ban" = true ]; then
         install -d -m 0755 /mnt/etc/fail2ban/jail.d
-        cat > /mnt/etc/fail2ban/jail.d/sshd.local <<EOF
-[DEFAULT]
-backend = systemd
-banaction = nftables
-banaction_allports = nftables[type=allports]
-bantime = 1h
-findtime = 10m
-maxretry = 5
-
-[sshd]
-enabled = true
-port = $ssh_port
-mode = aggressive
-EOF
+        {
+            printf '[DEFAULT]\n'
+            printf 'backend = systemd\n'
+            printf 'banaction = nftables\n'
+            printf 'banaction_allports = nftables[type=allports]\n'
+            printf 'bantime = 1h\n'
+            printf 'findtime = 10m\n'
+            printf 'maxretry = 5\n'
+            printf '\n'
+            printf '[sshd]\n'
+            printf 'enabled = true\n'
+            printf 'port = %s\n' "$ssh_port"
+            printf 'mode = aggressive\n'
+        } > /mnt/etc/fail2ban/jail.d/sshd.local
         chmod 0644 /mnt/etc/fail2ban/jail.d/sshd.local
         arch-chroot /mnt fail2ban-client -t
         arch-chroot /mnt systemctl enable fail2ban.service
