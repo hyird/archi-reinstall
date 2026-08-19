@@ -13,7 +13,7 @@ umask 077
 # Functions use POSIX subshell bodies where variable isolation is required.
 
 readonly ARCHI_PAYLOAD_ID='archi-network-reinstall-v1'
-readonly ARCHI_VERSION='0.10.0'
+readonly ARCHI_VERSION='0.11.0'
 readonly ARCHI_RAW_URL='https://raw.githubusercontent.com/hyird/archi-reinstall/main/archi.sh'
 ARCHI_SOURCE_FILE=$0
 readonly DEFAULT_ALPINE_MIRROR='https://dl-cdn.alpinelinux.org/alpine'
@@ -28,6 +28,13 @@ readonly ALIYUN_PACKAGE_MIRROR="https://mirrors.aliyun.com/archlinux/\$repo/os/\
 readonly TENCENT_ALPINE_MIRROR='https://mirrors.cloud.tencent.com/alpine'
 readonly TENCENT_PACKAGE_MIRROR="https://mirrors.cloud.tencent.com/archlinux/\$repo/os/\$arch"
 readonly DEFAULT_INSTALL_DIR='/boot/archi-reinstall'
+# Everything the installer needs travels inside the apkovl instead of on the
+# kernel command line. x86_64 truncates /proc/cmdline at COMMAND_LINE_SIZE
+# (2048 bytes) without a word of warning, and a base64 RSA-4096 authorized key
+# alone pushed the old single-line form past 2200 bytes: the tail options went
+# missing and the installer died in Alpine with an unrelated-looking error.
+# It also keeps the root password hash out of world-readable /proc/cmdline.
+readonly ARCHI_CONFIG_FILE='/etc/archi/config'
 # Legacy staging paths, still removed by --cleanup so that an entry staged by an
 # older version can be undone by a newer one.
 readonly GRUB_ENTRY_FILE='/etc/grub.d/42_archi_reinstall'
@@ -41,10 +48,15 @@ warn() (
     printf '[archi] WARNING: %s\n' "$*" >&2
 )
 
-die() (
+# Deliberately not a subshell body: from inside "( )" the exit would only leave
+# die itself, and whether the caller then stopped depended on set -e still being
+# armed -- which it is not on either side of an || list or inside a condition.
+# As a brace function the exit leaves the enclosing shell, so "cmd || die msg"
+# aborts in every context.
+die() {
     printf '[archi] ERROR: %s\n' "$*" >&2
     exit 1
-)
+}
 
 usage() (
     cat <<'EOF'
@@ -56,20 +68,31 @@ Options:
   --authorized-key /root/.ssh/authorized_keys
                                Root SSH public key, file path, or URL.
   --password 'Archi-2026!'     Root password.
+  --password-file /root/pw     Read the root password from a file instead, so
+                               that it stays out of the shell history and ps.
   --disk /dev/vda              Whole target disk.
   --hostname arch              Installed hostname (default: arch).
   --timezone Asia/Shanghai     Installed timezone (default: Asia/Shanghai).
+  --interface eth0             Boot interface (default: the default route).
   --ip 192.0.2.10/24           Override the inherited static IPv4 address.
   --gateway 192.0.2.1          Override the inherited IPv4 gateway.
-  --dns 1.1.1.1                DNS servers (default: 1.1.1.1).
+  --dns 1.1.1.1                DNS servers (default: inherit, else 1.1.1.1).
   --ssh-port 22                SSH port (default: 22).
   --install "git htop"         Install extra official packages.
-  --no-ethx                    Keep predictable interface names instead of eth0.
-  --no-bbr                     Do not enable TCP BBR.
+  --kernel linux               Kernel package: linux or linux-lts (default:
+                               linux-lts).
+  --firmware                   Also install the linux-firmware bundle.
+  --boot-mode efi              Force bios or efi instead of autodetecting.
+  --grub-timeout 5             Installed GRUB menu timeout in seconds.
+  --ethx, --no-ethx            Rename interfaces to eth0 (default) or keep the
+                               predictable names.
+  --bbr, --no-bbr              Enable TCP BBR (default) or leave the defaults.
   --no-fail2ban                Do not install the default SSH jail.
   --swap-mib 1024              Swap file size in MiB (default: 0, disabled).
   --mirror https://mirrors.cloud.tencent.com/archlinux
                                Arch mirror root; repository path is appended.
+  --alpine-mirror https://dl-cdn.alpinelinux.org/alpine
+                               Alpine mirror root for the temporary environment.
   --tuna, --ustc, --aliyun     Use a regional mirror preset.
   --tencent                    Use the Tencent Cloud mirror preset.
   --hold                       Boot Alpine with SSH, but do not wipe.
@@ -110,10 +133,13 @@ validate_hostname() (
 )
 
 validate_packages() (
+    # A leading hyphen has to be rejected rather than merely allowed inside the
+    # name: the list is expanded with "set --" and handed to pacstrap, where a
+    # token such as -U or --noconfirm would be parsed as an option.
     printf '%s\n' "$1" | LC_ALL=C awk '
         {
             for (i = 1; i <= NF; i++) {
-                if ($i !~ /^[A-Za-z0-9@._+-]+$/) exit 1
+                if ($i !~ /^[A-Za-z0-9@._+][A-Za-z0-9@._+-]*$/) exit 1
             }
         }
     ' || die 'Extra packages contain an invalid package name'
@@ -164,6 +190,66 @@ validate_port() (
     fi
 )
 
+# Length is checked before the numeric comparison so that a caller cannot feed
+# an arbitrarily long digit string into the shell's integer arithmetic.
+validate_uint_range() (
+    name=$1 value=$2 maximum=$3
+    is_uint "$value" && [ "${#value}" -le "${#maximum}" ] && [ "$value" -le "$maximum" ] ||
+        die "$name must be an integer from 0 to $maximum"
+)
+
+# Not every host has an openssl new enough for -6, and minimal cloud images may
+# not have openssl at all, so fall back the way reinstall.sh does.
+hash_password() (
+    password=$1 hash=''
+    if command -v openssl >/dev/null 2>&1 &&
+        openssl passwd --help 2>&1 | LC_ALL=C grep -q -- '-6'; then
+        hash=$(printf '%s' "$password" | openssl passwd -6 -stdin)
+    elif command -v busybox >/dev/null 2>&1 &&
+        busybox mkpasswd --help 2>&1 | LC_ALL=C grep -qw sha512; then
+        hash=$(printf '%s' "$password" | busybox mkpasswd -m sha512)
+    elif command -v mkpasswd >/dev/null 2>&1 &&
+        mkpasswd -m help 2>&1 | LC_ALL=C grep -qw sha-512; then
+        hash=$(printf '%s' "$password" | mkpasswd -m sha-512 --stdin)
+    else
+        die 'No usable SHA-512 password hasher found; install openssl or whois'
+    fi
+    case $hash in
+        "\$6\$"*) printf '%s\n' "$hash" ;;
+        *) die 'Could not hash the root password' ;;
+    esac
+)
+
+# The same block is needed for the apkovl, for the running Alpine, and for the
+# installed system; keeping one copy keeps them from drifting apart.
+write_sshd_config() (
+    path=$1 port=$2 permit_root_login=$3 password_auth=$4
+    cat > "$path" <<EOF
+Port $port
+PermitRootLogin $permit_root_login
+PasswordAuthentication $password_auth
+KbdInteractiveAuthentication no
+PermitEmptyPasswords no
+LoginGraceTime 30
+MaxAuthTries 3
+MaxStartups 10:30:30
+PerSourceMaxStartups 3
+X11Forwarding no
+EOF
+    chmod 0644 "$path"
+)
+
+# Root logs in by key alone whenever a key was supplied, so that a password that
+# is only there for the serial console cannot also be used over the network.
+sshd_auth_mode() (
+    authorized_key=$1
+    if [ -n "$authorized_key" ]; then
+        printf 'prohibit-password no\n'
+    else
+        printf 'yes yes\n'
+    fi
+)
+
 encode_b64() (
     printf '%s' "$1" | base64 -w 0
 )
@@ -198,6 +284,42 @@ cmdline_value() (
 
 is_install_environment() (
     [ -r /proc/cmdline ] && grep -qw 'archi_mode=install' /proc/cmdline
+)
+
+# The config file holds one key=base64 pair per line. Base64 keeps spaces,
+# newlines and shell metacharacters out of the parser entirely, and splitting on
+# the first '=' only means the padding of the encoded value survives intact.
+config_value() (
+    key=$1 value=''
+    value=$(LC_ALL=C awk -v key="$key" '
+        index($0, key "=") == 1 {
+            print substr($0, length(key) + 2)
+            found = 1
+            exit
+        }
+        END { if (!found) exit 1 }
+    ' "$ARCHI_CONFIG_FILE") || die "Missing installer configuration key: $key"
+    decode_b64 "$value"
+)
+
+# Writes the staged settings that the Alpine side reads back with config_value.
+write_installer_config() (
+    path=$1
+    shift
+    : > "$path"
+    chmod 0600 "$path"
+    while [ "$#" -gt 0 ]; do
+        printf '%s=%s\n' "$1" "$(encode_b64 "$2")" >> "$path"
+        shift 2
+    done
+)
+
+is_archi_install_dir() (
+    install_dir=$1
+    { [ -f "$install_dir/.archi-owned" ] &&
+        grep -q "^$ARCHI_PAYLOAD_ID$" "$install_dir/.archi-owned"; } ||
+        { [ -f "$install_dir/manifest" ] &&
+        grep -q "^ARCHI_PAYLOAD_ID=$ARCHI_PAYLOAD_ID$" "$install_dir/manifest"; }
 )
 
 detect_root_disk() (
@@ -360,17 +482,15 @@ build_boot_network_parameter() (
 
 build_alpine_initramfs() (
     original=$1 destination=$2 authorized_key=$3 hostname=$4 ssh_port=$5 dns=$6
-    alpine_mirror=$7 password_hash=$8 source_file=$9
+    alpine_mirror=$7 password_hash=$8 source_file=$9 config_file=${10}
     work='' apkovl='' overlay='' apkovl_archive='' overlay_archive='' overlay_cpio='' archive_list=''
     dns_server='' shadow_last_change=''
-    permit_root_login='prohibit-password' password_auth='no' shadow_password='*'
-    if [ -n "$password_hash" ]; then
-        shadow_password=$password_hash
-        if [ -z "$authorized_key" ]; then
-            permit_root_login='yes'
-            password_auth='yes'
-        fi
-    fi
+    permit_root_login='' password_auth='' shadow_password='*'
+    # sshd_auth_mode emits exactly two whitespace-free fields.
+    # shellcheck disable=SC2046
+    set -- $(sshd_auth_mode "$authorized_key")
+    permit_root_login=$1 password_auth=$2
+    [ -z "$password_hash" ] || shadow_password=$password_hash
     work=$(mktemp -d)
     trap 'rm -rf -- "$work"' 0
     trap 'exit 129' 1
@@ -384,21 +504,25 @@ build_alpine_initramfs() (
     overlay_cpio=$work/archi-overlay.cpio
     archive_list=$work/archi-overlay.list
     mkdir -p -- "$overlay" "$apkovl/etc/apk" "$apkovl/etc/ssh/sshd_config.d" \
-        "$apkovl/root/.ssh"
+        "$apkovl/etc/archi" "$apkovl/root/.ssh"
 
-    cat > "$apkovl/etc/apk/world" <<'EOF'
-alpine-base
-apk-tools
+    # The single list archi-init hands to "apk add". An /etc/apk/world of our
+    # own used to sit next to it: init=/root/archi-init means OpenRC never runs
+    # and never acts on world, but "apk add" solves against it, so the two lists
+    # silently had to agree -- and they no longer did. The netboot image already
+    # ships a correct world, so overriding it buys nothing.
+    # coreutils is listed for numfmt even though arch-install-scripts pulls it.
+    cat > "$apkovl/etc/archi/apk-packages" <<'EOF'
 arch-install-scripts
 archlinux-keyring
 bash
 ca-certificates
+coreutils
 curl
 dosfstools
 e2fsprogs
 findmnt
 gnupg
-gptfdisk
 lsblk
 openssh
 parted
@@ -407,6 +531,7 @@ tzdata
 util-linux-misc
 wipefs
 EOF
+    cp -f -- "$config_file" "$apkovl/etc/archi/config"
     : > "$apkovl/etc/.default_boot_services"
     printf '%s\n' "$hostname" > "$apkovl/etc/hostname"
     cat > "$apkovl/etc/passwd" <<'EOF'
@@ -429,7 +554,7 @@ $alpine_mirror/latest-stable/community
 EOF
     printf '%s\n' \
         "$alpine_mirror/latest-stable/releases/x86_64/netboot/modloop-virt" \
-        > "$apkovl/etc/archi-modloop-url"
+        > "$apkovl/etc/archi/modloop-url"
     cat > "$apkovl/etc/pacman.conf" <<'EOF'
 [options]
 Architecture = auto
@@ -444,18 +569,8 @@ Include = /etc/pacman.d/mirrorlist
 [extra]
 Include = /etc/pacman.d/mirrorlist
 EOF
-    cat > "$apkovl/etc/ssh/sshd_config.d/60-archi-root-auth.conf" <<EOF
-Port $ssh_port
-PermitRootLogin $permit_root_login
-PasswordAuthentication $password_auth
-KbdInteractiveAuthentication no
-PermitEmptyPasswords no
-LoginGraceTime 30
-MaxAuthTries 3
-MaxStartups 10:30:30
-PerSourceMaxStartups 3
-X11Forwarding no
-EOF
+    write_sshd_config "$apkovl/etc/ssh/sshd_config.d/60-archi-root-auth.conf" \
+        "$ssh_port" "$permit_root_login" "$password_auth"
     if [ -n "$authorized_key" ]; then
         printf '%s\n' "$authorized_key" > "$apkovl/root/.ssh/authorized_keys"
     fi
@@ -502,13 +617,12 @@ for archi_tty in tty1 ttyS0 ttyAMA0; do
         </dev/null >/dev/null 2>&1 &
 done
 apk del alpine-base alpine-conf >/tmp/archi-apk-remove.log 2>&1
+# shellcheck disable=SC2046
+set -- $(cat /etc/archi/apk-packages)
 apk_rc=1
 apk_attempt=1
 while [ "$apk_attempt" -le 3 ]; do
-    if apk add --no-cache arch-install-scripts archlinux-keyring bash \
-        ca-certificates curl dosfstools e2fsprogs findmnt gnupg lsblk openssh \
-        parted sgdisk tzdata wipefs \
-        >/tmp/archi-apk.log 2>&1; then
+    if apk add --no-cache "$@" >/tmp/archi-apk.log 2>&1; then
         apk_rc=0
         break
     fi
@@ -518,21 +632,33 @@ while [ "$apk_attempt" -le 3 ]; do
 done
 echo "[archi] required APK exit status: $apk_rc"
 [ "$apk_rc" -eq 0 ] || cat /tmp/archi-apk.log
-mkdir -p /.modloop /lib
-curl --fail --location --retry 5 --retry-all-errors --retry-delay 2 \
-    --connect-timeout 10 --output /tmp/modloop-virt \
-    "$(cat /etc/archi-modloop-url)" >/tmp/archi-modloop.log 2>&1
-modloop_rc=$?
-if [ "$modloop_rc" -eq 0 ]; then
-    mount -t squashfs -o loop,ro /tmp/modloop-virt /.modloop
+# Alpine mounts the modloop from an OpenRC sysinit service, which init= skips,
+# so this normally has to fetch it. The guard is here so that a future Alpine
+# that does mount it in the initramfs does not get a second ~130 MiB download
+# and a second squashfs stacked on the same mount point.
+if [ -d /.modloop/modules ]; then
+    echo '[archi] modloop is already mounted; skipping the download.'
     ln -sfn /.modloop/modules /lib/modules
+    modloop_rc=0
+else
+    mkdir -p /.modloop /lib
+    curl --fail --location --retry 5 --retry-all-errors --retry-delay 2 \
+        --connect-timeout 10 --output /tmp/modloop-virt \
+        "$(cat /etc/archi/modloop-url)" >/tmp/archi-modloop.log 2>&1
+    modloop_rc=$?
+    if [ "$modloop_rc" -eq 0 ]; then
+        mount -t squashfs -o loop,ro /tmp/modloop-virt /.modloop
+        ln -sfn /.modloop/modules /lib/modules
+    else
+        echo "[archi] modloop download failed with status $modloop_rc"
+        cat /tmp/archi-modloop.log
+    fi
+fi
+if [ "$modloop_rc" -eq 0 ]; then
     for module in virtio_scsi virtio_blk sd_mod ahci nvme ext4 vfat; do
         modprobe "$module" >/dev/null 2>&1 || true
     done
     mdev -s >/dev/null 2>&1 || true
-else
-    echo "[archi] modloop download failed with status $modloop_rc"
-    cat /tmp/archi-modloop.log
 fi
 ssh-keygen -A >/tmp/archi-ssh-keygen.log 2>&1
 ssh_keygen_rc=$?
@@ -545,12 +671,17 @@ echo "[archi] sshd exit status: $sshd_rc"
 echo '[archi] SSH should be ready. Follow installation with: tail -f /tmp/archi-install.log'
 /root/archi.sh </dev/null >>/tmp/archi-install.log 2>&1 &
 installer_pid=$!
+installer_running=1
+# This is PID 1, so it must never exit, and the sleep is spelled as a background
+# job plus wait so that ash reaps whatever got reparented onto it. The guard is
+# an explicit flag rather than installer_pid=0: kill -0 0 signals the whole
+# process group and always succeeds, which only looked like it worked.
 while :; do
-    if ! kill -0 "$installer_pid" 2>/dev/null; then
+    if [ "$installer_running" = 1 ] && ! kill -0 "$installer_pid" 2>/dev/null; then
         wait "$installer_pid"
         installer_rc=$?
         echo "[archi] Installer exited with status $installer_rc; Alpine remains online."
-        installer_pid=0
+        installer_running=0
     fi
     sleep 5 &
     wait $!
@@ -585,9 +716,12 @@ EOF
     fi
     chmod 0600 "$apkovl/root/.profile"
     chmod 0600 "$apkovl/etc/shadow"
+    # The config carries the root password hash, so it stays root-only.
+    chmod 0700 "$apkovl/etc/archi"
+    chmod 0600 "$apkovl/etc/archi/config"
     chmod 0644 "$apkovl/etc/hostname" "$apkovl/etc/resolv.conf" \
         "$apkovl/etc/passwd" "$apkovl/etc/group" "$apkovl/etc/apk/repositories" \
-        "$apkovl/etc/archi-modloop-url" \
+        "$apkovl/etc/archi/modloop-url" "$apkovl/etc/archi/apk-packages" \
         "$apkovl/etc/pacman.conf" \
         "$apkovl/etc/ssh/sshd_config.d/60-archi-root-auth.conf"
 
@@ -602,18 +736,6 @@ EOF
     trap - 0 1 2 15
 )
 
-first_public_key() (
-    file=$1
-    [ -r "$file" ] || die "SSH public key file is not readable: $file"
-    awk '
-        /^[[:space:]]*#/ || /^[[:space:]]*$/ { next }
-        /(^|[[:space:]])(ssh-ed25519|ssh-rsa|ecdsa-sha2-nistp(256|384|521))[[:space:]]/ {
-            print
-            exit
-        }
-    ' "$file"
-)
-
 first_public_key_text() (
     printf '%s\n' "$1" | awk '
         /^[[:space:]]*#/ || /^[[:space:]]*$/ { next }
@@ -622,6 +744,12 @@ first_public_key_text() (
             exit
         }
     '
+)
+
+first_public_key() (
+    file=$1
+    [ -r "$file" ] || die "SSH public key file is not readable: $file"
+    first_public_key_text "$(cat "$file")"
 )
 
 probe_url() (
@@ -692,6 +820,22 @@ grub_cfg_reads_custom() (
     LC_ALL=C grep -q 'custom\.cfg' "$1"
 )
 
+# "search --file" has to read the filesystem holding the staged kernel, so the
+# matching GRUB module must be loaded first. Only ext2 used to be inserted,
+# which left every machine with an xfs or btrfs /boot -- the Red Hat default --
+# unable to find its own boot entry.
+grub_fs_module() (
+    fstype=$1
+    case $fstype in
+        ext2|ext3|ext4) printf 'ext2\n' ;;
+        xfs|btrfs|f2fs|jfs|reiserfs|zfs) printf '%s\n' "$fstype" ;;
+        vfat|msdos) printf 'fat\n' ;;
+        # Unknown or undetectable: offer the plausible ones and let GRUB skip
+        # whichever modules it does not have.
+        *) printf 'ext2\nxfs\nbtrfs\nfat\n' ;;
+    esac
+)
+
 update_grub_config() (
     if command -v update-grub >/dev/null 2>&1; then
         update-grub
@@ -756,14 +900,8 @@ cleanup_stage() (
         changed=true regenerate=true
     fi
     if [ -e "$install_dir" ]; then
-        if { [ -f "$install_dir/.archi-owned" ] &&
-            grep -q "^$ARCHI_PAYLOAD_ID$" "$install_dir/.archi-owned"; } ||
-            { [ -f "$install_dir/manifest" ] &&
-            grep -q "^ARCHI_PAYLOAD_ID=$ARCHI_PAYLOAD_ID$" "$install_dir/manifest"; }; then
-            :
-        else
+        is_archi_install_dir "$install_dir" ||
             die "Refusing to remove an unrecognized install directory: $install_dir"
-        fi
         rm -rf -- "$install_dir"
         changed=true
     fi
@@ -792,7 +930,9 @@ stage_main() (
     disk=''
     hostname='arch'
     timezone='Asia/Shanghai'
-    dns='1.1.1.1'
+    # Empty means inherit the resolvers of the running system, the same way --ip
+    # and --gateway inherit the current addressing.
+    dns=''
     ntp='time.cloudflare.com'
     requested_interface='auto'
     requested_ip=''
@@ -807,7 +947,8 @@ stage_main() (
     install_dir=$DEFAULT_INSTALL_DIR
     hold=false
     dry_run=false cleanup=false
-    source_tmp='' authorized_key_tmp='' source_file=$ARCHI_SOURCE_FILE
+    source_tmp='' authorized_key_tmp='' config_tmp='' password_file=''
+    source_file=$ARCHI_SOURCE_FILE
 
     while [ "$#" -gt 0 ]; do
         case $1 in
@@ -816,20 +957,37 @@ stage_main() (
             --tuna) alpine_mirror=$TUNA_ALPINE_MIRROR; package_mirror=$TUNA_PACKAGE_MIRROR; dns='119.29.29.29 223.5.5.5'; ntp='time.amazonaws.cn'; shift ;;
             --tencent) alpine_mirror=$TENCENT_ALPINE_MIRROR; package_mirror=$TENCENT_PACKAGE_MIRROR; dns='119.29.29.29'; ntp='time.amazonaws.cn'; shift ;;
             --mirror) package_mirror="$(trim_trailing_slash "${2:?missing value}")/\$repo/os/\$arch"; shift 2 ;;
+            --alpine-mirror) alpine_mirror=${2:?missing value}; shift 2 ;;
             --authorized-key) authorized_key_input=${2:?missing value}; shift 2 ;;
             --password) password=${2:?missing value}; shift 2 ;;
+            --password-file)
+                password_file=${2:?missing value}
+                [ -r "$password_file" ] || die "Password file is not readable: $password_file"
+                # Only the first line, without its newline, so that an editor's
+                # trailing newline does not become part of the password.
+                password=$(LC_ALL=C awk 'NR == 1 { printf "%s", $0 }' "$password_file")
+                [ -n "$password" ] || die "Password file is empty: $password_file"
+                shift 2
+                ;;
             --disk) disk=${2:?missing value}; shift 2 ;;
             --hostname) hostname=${2:?missing value}; shift 2 ;;
             --timezone) timezone=${2:?missing value}; shift 2 ;;
+            --interface) requested_interface=${2:?missing value}; shift 2 ;;
             --ip) requested_ip=${2:?missing value}; shift 2 ;;
             --gateway) requested_gateway=${2:?missing value}; shift 2 ;;
             --dns) dns=${2:?missing value}; shift 2 ;;
             --ssh-port) ssh_port=${2:?missing value}; shift 2 ;;
             --bbr) bbr=true; shift ;;
             --no-bbr) bbr=false; shift ;;
+            --fail2ban) fail2ban=true; shift ;;
             --no-fail2ban) fail2ban=false; shift ;;
+            --firmware) firmware=true; shift ;;
+            --no-firmware) firmware=false; shift ;;
             --ethx) ethx=true; shift ;;
             --no-ethx) ethx=false; shift ;;
+            --kernel) kernel=${2:?missing value}; shift 2 ;;
+            --boot-mode) boot_mode=${2:?missing value}; shift 2 ;;
+            --grub-timeout) grub_timeout=${2:?missing value}; shift 2 ;;
             --install) extra_packages=${2:?missing value}; shift 2 ;;
             --swap-mib) swap_mib=${2:?missing value}; shift 2 ;;
             --hold) hold=true; shift ;;
@@ -861,12 +1019,17 @@ stage_main() (
     need_cmd mountpoint
     need_cmd sha256sum
     need_cmd stat
-    need_cmd systemctl
+    # systemctl is deliberately not required: the reboot at the end already
+    # falls back to reboot(8) and then to reboot -f, and demanding systemd here
+    # would reject exactly the minimal images that fallback exists for.
 
     alpine_mirror=$(trim_trailing_slash "$alpine_mirror")
     package_mirror=$(trim_trailing_slash "$package_mirror")
     validate_url '--alpine-mirror' "$alpine_mirror"
     validate_url '--package-mirror' "$package_mirror"
+    # Armed before the first mktemp, otherwise a failed download leaks the
+    # temporary file it was writing into.
+    trap 'rm -f -- "${authorized_key_tmp:-}" "${source_tmp:-}" "${config_tmp:-}"' 0
     case $source_file in
         /dev/fd/*|/proc/self/fd/*)
             source_tmp=$(mktemp)
@@ -874,7 +1037,6 @@ stage_main() (
             source_file=$source_tmp
             ;;
     esac
-    trap 'rm -f -- "${authorized_key_tmp:-}" "${source_tmp:-}"' 0
     if [ -n "$authorized_key_input" ]; then
         case $authorized_key_input in
             http://*|https://*)
@@ -904,11 +1066,10 @@ stage_main() (
         '^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?$' || die "Invalid NTP host: $ntp"
     [ "$requested_interface" = auto ] || printf '%s\n' "$requested_interface" |
         LC_ALL=C grep -Eq '^[A-Za-z0-9_.:-]+$' || die "Invalid interface name: $requested_interface"
-    is_uint "$swap_mib" && [ "${#swap_mib}" -le 7 ] && [ "$swap_mib" -le 1048576 ] ||
-        die '--swap-mib must be an integer from 0 to 1048576'
-    is_uint "$grub_timeout" && [ "${#grub_timeout}" -le 2 ] && [ "$grub_timeout" -le 60 ] ||
-        die '--grub-timeout must be an integer from 0 to 60'
+    validate_uint_range '--swap-mib' "$swap_mib" 1048576
+    validate_uint_range '--grub-timeout' "$grub_timeout" 60
     case $boot_mode in auto|bios|efi) ;; *) die '--boot-mode must be auto, bios, or efi' ;; esac
+    case $kernel in linux|linux-lts) ;; *) die '--kernel must be linux or linux-lts' ;; esac
     case $timezone in *[[:space:]]*|*"'"*|*'"'*|*\\*) die 'Invalid timezone' ;; esac
     safe_install_dir "$install_dir"
 
@@ -938,9 +1099,7 @@ stage_main() (
         [ -n "$authorized_key" ] || die "No supported SSH public key found in $authorized_key_file"
     fi
     if [ -n "$password" ]; then
-        need_cmd openssl
-        password_hash=$(printf '%s\n' "$password" | openssl passwd -6 -stdin)
-        case $password_hash in "\$6\$"*) ;; *) die 'Could not hash the root password' ;; esac
+        password_hash=$(hash_password "$password")
     fi
 
     boot_interface='' bootif='' boot_interface_details=''
@@ -1052,14 +1211,9 @@ EOF
     need_cmd gzip
     need_cmd tar
     if [ -e "$install_dir" ]; then
-        if { [ -f "$install_dir/.archi-owned" ] &&
-            grep -q "^$ARCHI_PAYLOAD_ID$" "$install_dir/.archi-owned"; } ||
-            { [ -f "$install_dir/manifest" ] &&
-            grep -q "^ARCHI_PAYLOAD_ID=$ARCHI_PAYLOAD_ID$" "$install_dir/manifest"; }; then
-            rm -rf -- "$install_dir"
-        else
+        is_archi_install_dir "$install_dir" ||
             die "Refusing to replace an unrecognized install directory: $install_dir"
-        fi
+        rm -rf -- "$install_dir"
     fi
     mkdir -p -- "$install_dir"
     printf '%s\n' "$ARCHI_PAYLOAD_ID" > "$install_dir/.archi-owned"
@@ -1071,23 +1225,6 @@ EOF
     if ! wait "$kernel_download_pid"; then download_failed=true; fi
     if ! wait "$initramfs_download_pid"; then download_failed=true; fi
     [ "$download_failed" = false ] || die 'Could not download the Alpine boot files'
-    build_alpine_initramfs "$install_dir/initramfs-virt.official" \
-        "$install_dir/initramfs-virt" "$authorized_key" 'alpine' "$ssh_port" "$dns" \
-        "$alpine_mirror" "$password_hash" "$source_file"
-    rm -f -- "$install_dir/initramfs-virt.official"
-
-    disk_b64='' hostname_b64='' timezone_b64='' dns_b64='' key_b64='' password_hash_b64='' package_mirror_b64=''
-    extra_packages_b64='' kernel_b64='' ntp_b64=''
-    disk_b64=$(encode_b64 "$disk")
-    hostname_b64=$(encode_b64 "$hostname")
-    timezone_b64=$(encode_b64 "$timezone")
-    dns_b64=$(encode_b64 "$dns")
-    key_b64=$(encode_b64 "$authorized_key")
-    password_hash_b64=$(encode_b64 "$password_hash")
-    package_mirror_b64=$(encode_b64 "$package_mirror")
-    extra_packages_b64=$(encode_b64 "$extra_packages")
-    kernel_b64=$(encode_b64 "$kernel")
-    ntp_b64=$(encode_b64 "$ntp")
 
     boot_mac=''
     boot_mac=${bootif#01-}
@@ -1096,8 +1233,47 @@ EOF
         */*) [ -n "$boot_gateway" ] || { boot_cidr=''; boot_gateway=''; } ;;
         *) boot_cidr=''; boot_gateway='' ;;
     esac
+    hold_flag=0
+    [ "$hold" = true ] && hold_flag=1
 
-    grub_prefix='' grub_stage_dir='' grub_kernel='' grub_initramfs='' hold_flag=''
+    # Everything the Alpine side needs, carried inside the apkovl. See the
+    # ARCHI_CONFIG_FILE comment for why none of this belongs on the cmdline.
+    config_tmp=$(mktemp)
+    write_installer_config "$config_tmp" \
+        version "$ARCHI_VERSION" \
+        disk "$disk" \
+        hostname "$hostname" \
+        timezone "$timezone" \
+        dns "$dns" \
+        authorized_key "$authorized_key" \
+        password_hash "$password_hash" \
+        package_mirror "$package_mirror" \
+        extra_packages "$extra_packages" \
+        kernel "$kernel" \
+        ntp "$ntp" \
+        boot_mode "$boot_mode" \
+        swap_mib "$swap_mib" \
+        hold "$hold_flag" \
+        boot_cidr "$boot_cidr" \
+        gateway "$boot_gateway" \
+        boot_mac "$boot_mac" \
+        ssh_port "$ssh_port" \
+        bbr "$bbr" \
+        fail2ban "$fail2ban" \
+        firmware "$firmware" \
+        ethx "$ethx" \
+        grub_timeout "$grub_timeout"
+
+    build_alpine_initramfs "$install_dir/initramfs-virt.official" \
+        "$install_dir/initramfs-virt" "$authorized_key" 'alpine' "$ssh_port" "$dns" \
+        "$alpine_mirror" "$password_hash" "$source_file" "$config_tmp"
+    rm -f -- "$install_dir/initramfs-virt.official" "$config_tmp"
+    config_tmp=''
+    # The apkovl inside it holds the root password hash and the authorized key.
+    # Non-fatal: /boot is sometimes the vfat ESP, which rejects chmod outright.
+    chmod 0600 "$install_dir/initramfs-virt" 2>/dev/null || true
+
+    grub_prefix='' grub_stage_dir='' grub_kernel='' grub_initramfs=''
     if mountpoint -q /boot; then
         grub_prefix=''
     else
@@ -1106,8 +1282,6 @@ EOF
     grub_stage_dir=${install_dir#/boot}
     grub_kernel="$grub_prefix$grub_stage_dir/vmlinuz-virt"
     grub_initramfs="$grub_prefix$grub_stage_dir/initramfs-virt"
-    hold_flag=0
-    [ "$hold" = true ] && hold_flag=1
 
     cat > "$install_dir/manifest" <<EOF
 ARCHI_PAYLOAD_ID=$ARCHI_PAYLOAD_ID
@@ -1154,19 +1328,53 @@ EOF
         log "Existing custom.cfg saved as $custom_cfg.archi-orig"
     fi
 
+    boot_fstype='' grub_insmod='' grub_btrfs_path=''
+    boot_fstype=$(findmnt -n -o FSTYPE --target "$install_dir" 2>/dev/null || true)
+    for grub_fs in $(grub_fs_module "$boot_fstype"); do
+        grub_insmod="$grub_insmod    insmod $grub_fs
+"
+    done
+    if [ "$boot_fstype" = btrfs ]; then
+        # Paths under a btrfs subvolume are otherwise resolved relative to the
+        # subvolume root rather than to the filesystem root.
+        grub_btrfs_path='    set btrfs_relative_path=n
+'
+    fi
+
+    # grub-reboot stores the one-shot choice in grubenv, and grub.cfg only acts
+    # on it when it managed to load that file. Where GRUB's prefix sits on the
+    # EFI partition but grubenv lives under /boot, it silently does not, and the
+    # machine quietly boots the old system instead. Borrowed from reinstall.sh.
 cat > "$custom_cfg" <<EOF
 # ARCHI_PAYLOAD_ID=$ARCHI_PAYLOAD_ID
 # Written by archi.sh. Remove with: archi.sh --cleanup
-menuentry 'Arch Linux network reinstall (ERASES TARGET DISK)' --id archi {
+if ! [ -s \$prefix/grubenv ]; then
+    for archi_dir in /boot/grub /boot/grub2 /grub /grub2; do
+        set archi_grubenv="(\$root)\$archi_dir/grubenv"
+        if [ -s \$archi_grubenv ]; then
+            load_env --file \$archi_grubenv
+            if [ "\${next_entry}" ]; then
+                set default="\${next_entry}"
+                set next_entry=
+                save_env --file \$archi_grubenv next_entry
+            fi
+        fi
+    done
+fi
+# --unrestricted so that the entry still boots under a password-protected menu.
+menuentry 'Arch Linux network reinstall (ERASES TARGET DISK)' --id archi --unrestricted {
     insmod part_gpt
     insmod part_msdos
-    insmod ext2
-    search --no-floppy --file --set=root $grub_kernel
-    linux $grub_kernel modules=loop,squashfs,sd_mod,usb_storage,virtio_scsi,virtio_blk alpine_repo=$alpine_mirror/latest-stable/main,$alpine_mirror/latest-stable/community apkovl=/archi.apkovl.tar.gz init=/root/archi-init $boot_network archi_mode=install archi_payload_sha256=$payload_sha archi_disk_b64=$disk_b64 archi_hostname_b64=$hostname_b64 archi_timezone_b64=$timezone_b64 archi_dns_b64=$dns_b64 archi_key_b64=$key_b64 archi_password_hash_b64=$password_hash_b64 archi_package_mirror_b64=$package_mirror_b64 archi_extra_packages_b64=$extra_packages_b64 archi_kernel_b64=$kernel_b64 archi_ntp_b64=$ntp_b64 archi_boot_mode=$boot_mode archi_swap_mib=$swap_mib archi_hold=$hold_flag archi_boot_cidr=$boot_cidr archi_gateway=$boot_gateway archi_boot_mac=$boot_mac archi_ssh_port=$ssh_port archi_bbr=$bbr archi_fail2ban=$fail2ban archi_firmware=$firmware archi_ethx=$ethx archi_grub_timeout=$grub_timeout
+    insmod lvm
+    insmod all_video
+$grub_insmod$grub_btrfs_path    search --no-floppy --file --set=root $grub_kernel
+    linux $grub_kernel modules=loop,squashfs,sd_mod,usb_storage,virtio_scsi,virtio_blk alpine_repo=$alpine_mirror/latest-stable/main,$alpine_mirror/latest-stable/community apkovl=/archi.apkovl.tar.gz init=/root/archi-init $boot_network archi_mode=install archi_payload_sha256=$payload_sha
     initrd $grub_initramfs
 }
 EOF
-    chmod 0644 "$custom_cfg"
+    # GRUB reads the filesystem directly and ignores these bits, so tightening
+    # them costs nothing; on a vfat ESP the chmod simply cannot take effect.
+    chmod 0600 "$custom_cfg" 2>/dev/null || true
     log "Reinstall entry written to $custom_cfg"
 
     # Select the entry for the next boot only. As a persistent GRUB_DEFAULT it
@@ -1236,7 +1444,9 @@ installer_exit() {
     trap - 0 1 2 15
     if [ "$INSTALLER_EXIT_STATUS" -ne 0 ]; then
         warn "Installation failed with exit code $INSTALLER_EXIT_STATUS. Alpine is being left online for diagnosis."
-        /usr/sbin/sshd >/dev/null 2>&1 || true
+        # archi-init normally has sshd running already; this only covers the
+        # case where it died, or where the installer was started by hand.
+        pidof sshd >/dev/null 2>&1 || /usr/sbin/sshd >/dev/null 2>&1 || true
         sync
     fi
     if [ -n "${INSTALLER_TEE_PID:-}" ]; then
@@ -1290,28 +1500,30 @@ installer_main() (
     disk='' hostname='' timezone='' dns='' authorized_key='' password_hash='' package_mirror='' extra_packages='' kernel='' ntp=''
     boot_mode='' swap_mib='' hold='' boot_cidr='' boot_gateway='' boot_mac=''
     ssh_port='' bbr='' fail2ban='' firmware='' ethx='' grub_timeout=''
-    disk=$(decode_b64 "$(cmdline_value archi_disk_b64)")
-    hostname=$(decode_b64 "$(cmdline_value archi_hostname_b64)")
-    timezone=$(decode_b64 "$(cmdline_value archi_timezone_b64)")
-    dns=$(decode_b64 "$(cmdline_value archi_dns_b64)")
-    authorized_key=$(decode_b64 "$(cmdline_value archi_key_b64)")
-    password_hash=$(decode_b64 "$(cmdline_value archi_password_hash_b64)")
-    package_mirror=$(decode_b64 "$(cmdline_value archi_package_mirror_b64)")
-    extra_packages=$(decode_b64 "$(cmdline_value archi_extra_packages_b64)")
-    kernel=$(decode_b64 "$(cmdline_value archi_kernel_b64)")
-    ntp=$(decode_b64 "$(cmdline_value archi_ntp_b64)")
-    boot_mode=$(cmdline_value archi_boot_mode)
-    swap_mib=$(cmdline_value archi_swap_mib)
-    hold=$(cmdline_value archi_hold)
-    boot_cidr=$(cmdline_value archi_boot_cidr || true)
-    boot_gateway=$(cmdline_value archi_gateway || true)
-    boot_mac=$(cmdline_value archi_boot_mac || true)
-    ssh_port=$(cmdline_value archi_ssh_port)
-    bbr=$(cmdline_value archi_bbr)
-    fail2ban=$(cmdline_value archi_fail2ban)
-    firmware=$(cmdline_value archi_firmware)
-    ethx=$(cmdline_value archi_ethx)
-    grub_timeout=$(cmdline_value archi_grub_timeout)
+    [ -r "$ARCHI_CONFIG_FILE" ] ||
+        die "Installer configuration is missing: $ARCHI_CONFIG_FILE"
+    disk=$(config_value disk)
+    hostname=$(config_value hostname)
+    timezone=$(config_value timezone)
+    dns=$(config_value dns)
+    authorized_key=$(config_value authorized_key)
+    password_hash=$(config_value password_hash)
+    package_mirror=$(config_value package_mirror)
+    extra_packages=$(config_value extra_packages)
+    kernel=$(config_value kernel)
+    ntp=$(config_value ntp)
+    boot_mode=$(config_value boot_mode)
+    swap_mib=$(config_value swap_mib)
+    hold=$(config_value hold)
+    boot_cidr=$(config_value boot_cidr)
+    boot_gateway=$(config_value gateway)
+    boot_mac=$(config_value boot_mac)
+    ssh_port=$(config_value ssh_port)
+    bbr=$(config_value bbr)
+    fail2ban=$(config_value fail2ban)
+    firmware=$(config_value firmware)
+    ethx=$(config_value ethx)
+    grub_timeout=$(config_value grub_timeout)
 
     validate_hostname "$hostname"
     validate_packages "$extra_packages"
@@ -1320,10 +1532,9 @@ installer_main() (
     [ "$(lsblk -ndo TYPE "$disk")" = disk ] || die "Target is not a whole disk: $disk"
     case $boot_mode in bios|efi) ;; *) die "Invalid boot mode: $boot_mode" ;; esac
     [ "$boot_mode" != efi ] || need_cmd mkfs.fat
-    is_uint "$swap_mib" && [ "${#swap_mib}" -le 7 ] && [ "$swap_mib" -le 1048576 ] ||
-        die 'Invalid swap size'
+    validate_uint_range 'swap size' "$swap_mib" 1048576
     if [ "$swap_mib" -gt 0 ]; then
-        need_cmd fallocate
+        need_cmd dd
         need_cmd mkswap
     fi
     case $kernel in linux|linux-lts) ;; *) die 'Invalid kernel package' ;; esac
@@ -1333,7 +1544,7 @@ installer_main() (
     case $firmware in true|false) ;; *) die 'Invalid firmware setting' ;; esac
     case $ethx in true|false) ;; *) die 'Invalid ethx setting' ;; esac
     case $hold in 0|1) ;; *) die 'Invalid hold setting' ;; esac
-    is_uint "$grub_timeout" && [ "${#grub_timeout}" -le 2 ] && [ "$grub_timeout" -le 60 ] || die 'Invalid GRUB timeout'
+    validate_uint_range 'GRUB timeout' "$grub_timeout" 60
     printf '%s\n' "$ntp" | LC_ALL=C grep -Eq \
         '^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?$' || die 'Invalid NTP host'
     case $timezone in *[[:space:]]*|*"'"*|*'"'*|*\\*) die 'Invalid timezone' ;; esac
@@ -1381,27 +1592,17 @@ installer_main() (
         printf '%s\n' "$authorized_key" > /root/.ssh/authorized_keys
         chmod 0600 /root/.ssh/authorized_keys
     fi
-    permit_root_login='yes' password_auth='yes'
-    if [ -n "$authorized_key" ]; then
-        permit_root_login='prohibit-password'
-        password_auth='no'
-    fi
+    permit_root_login='' password_auth=''
+    # sshd_auth_mode emits exactly two whitespace-free fields.
+    # shellcheck disable=SC2046
+    set -- $(sshd_auth_mode "$authorized_key")
+    permit_root_login=$1 password_auth=$2
+    # The apkovl already shipped this file and archi-init started sshd with it;
+    # rewriting it keeps the two in step if the config ever grows a value that
+    # only the installer knows, and matters when installer_exit restarts sshd.
     install -d -m 0755 /etc/ssh/sshd_config.d
-    cat > /etc/ssh/sshd_config.d/60-archi-root-auth.conf <<EOF
-Port $ssh_port
-PermitRootLogin $permit_root_login
-PasswordAuthentication $password_auth
-KbdInteractiveAuthentication no
-PermitEmptyPasswords no
-LoginGraceTime 30
-MaxAuthTries 3
-MaxStartups 10:30:30
-PerSourceMaxStartups 3
-X11Forwarding no
-EOF
-    chmod 0644 /etc/ssh/sshd_config.d/60-archi-root-auth.conf
-    cp -f -- "$ARCHI_SOURCE_FILE" /root/archi-installer.sh
-    chmod 0700 /root/archi-installer.sh
+    write_sshd_config /etc/ssh/sshd_config.d/60-archi-root-auth.conf \
+        "$ssh_port" "$permit_root_login" "$password_auth"
 
     install -d -m 0755 /etc/pacman.d
     printf 'Server = %s\n' "$package_mirror" > /etc/pacman.d/mirrorlist
@@ -1450,9 +1651,12 @@ EOF
     if command -v ntpd >/dev/null 2>&1; then
         ntpd -q -p "$ntp" || warn "Could not synchronize time with $ntp; using the current system clock"
     fi
+    # Building the keyring is tens of seconds of gpg work in the Alpine tmpfs and
+    # touches nothing on the target, so it overlaps with the wipe, the
+    # partitioning and the mkfs. It is waited for before pacstrap needs it.
     log 'Initializing the Arch Linux package-signing keyring'
-    pacman-key --init
-    pacman-key --populate archlinux
+    { pacman-key --init && pacman-key --populate archlinux; } >/tmp/archi-keyring.log 2>&1 &
+    keyring_pid=$!
 
     log "ERASING and partitioning $disk"
     swapoff -a 2>/dev/null || true
@@ -1490,8 +1694,9 @@ EOF
     fi
 
     packages=''
+    # coreutils comes with base, and mkinitcpio uses libarchive rather than cpio.
     packages="base $kernel grub openssh sudo qemu-guest-agent
-        inetutils coreutils bash-completion wget curl vim nano cpio"
+        inetutils bash-completion wget curl vim nano"
     [ "$fail2ban" = true ] && packages="$packages fail2ban nftables"
     [ "$firmware" = true ] && packages="$packages linux-firmware"
     if [ "$boot_mode" = efi ]; then packages="$packages efibootmgr"; fi
@@ -1507,6 +1712,9 @@ EOF
     install -d -m 0755 /mnt/etc
     printf 'KEYMAP=us\n' > /mnt/etc/vconsole.conf
     chmod 0644 /mnt/etc/vconsole.conf
+
+    wait "$keyring_pid" || { cat /tmp/archi-keyring.log; die 'Could not build the Arch package-signing keyring'; }
+    log 'Arch Linux package-signing keyring is ready'
 
     log "Installing packages: $*"
     pacstrap_ok=false
@@ -1528,7 +1736,11 @@ EOF
     chmod 0644 /mnt/etc/resolv.conf
 
     if [ "$swap_mib" -gt 0 ]; then
-        fallocate -l "${swap_mib}M" /mnt/swapfile
+        # Written out rather than fallocate'd: a preallocated file is made of
+        # unwritten extents, and swapon refuses those, which would only surface
+        # as a missing swap after the installed system has already booted.
+        log "Creating a ${swap_mib} MiB swap file"
+        dd if=/dev/zero of=/mnt/swapfile bs=1M count="$swap_mib" status=none
         chmod 0600 /mnt/swapfile
         mkswap /mnt/swapfile
         printf '/swapfile none swap defaults 0 0\n' >> /mnt/etc/fstab
@@ -1577,7 +1789,6 @@ net.ipv4.tcp_slow_start_after_idle = 0
 net.ipv4.tcp_syncookies = 1
 EOF
         chmod 0644 /mnt/etc/sysctl.d/99-archi-bbr.conf
-        ln -sfn sysctl.d/99-archi-bbr.conf /mnt/etc/sysctl.conf
     fi
 
     install -d -m 0755 /mnt/etc/systemd/network
@@ -1613,19 +1824,8 @@ EOF
         chmod 0600 /mnt/root/.ssh/authorized_keys
     fi
     install -d -m 0755 /mnt/etc/ssh/sshd_config.d
-    cat > /mnt/etc/ssh/sshd_config.d/60-root-auth.conf <<EOF
-Port $ssh_port
-PermitRootLogin $permit_root_login
-PasswordAuthentication $password_auth
-KbdInteractiveAuthentication no
-PermitEmptyPasswords no
-LoginGraceTime 30
-MaxAuthTries 3
-MaxStartups 10:30:30
-PerSourceMaxStartups 3
-X11Forwarding no
-EOF
-    chmod 0644 /mnt/etc/ssh/sshd_config.d/60-root-auth.conf
+    write_sshd_config /mnt/etc/ssh/sshd_config.d/60-root-auth.conf \
+        "$ssh_port" "$permit_root_login" "$password_auth"
     if [ -n "$password_hash" ]; then
         printf 'root:%s\n' "$password_hash" | arch-chroot /mnt chpasswd -e
     else
@@ -1674,7 +1874,14 @@ EOF
         ln -sfn /dev/null /mnt/etc/udev/rules.d/80-net-setup-link.rules
     fi
     arch-chroot /mnt grub-mkconfig -o /boot/grub/grub.cfg
-    arch-chroot /mnt mkinitcpio -P
+    # pacstrap's mkinitcpio hook already built these, and /etc/vconsole.conf was
+    # in place before pacstrap ran so that build is complete. Rebuilding costs
+    # another half minute, but skipping it blindly would leave an unbootable
+    # system if the hook ever did not fire, so check instead of assuming.
+    if ! ls /mnt/boot/initramfs-*.img >/dev/null 2>&1; then
+        warn 'No initramfs was generated during pacstrap; building it now'
+        arch-chroot /mnt mkinitcpio -P
+    fi
 
     if [ -x /mnt/usr/bin/qemu-ga ]; then
         arch-chroot /mnt systemctl enable qemu-guest-agent.service
