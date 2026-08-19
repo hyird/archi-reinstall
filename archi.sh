@@ -77,6 +77,7 @@ Options:
   --ip 192.0.2.10/24           Override the inherited static IPv4 address.
   --gateway 192.0.2.1          Override the inherited IPv4 gateway.
   --dns 1.1.1.1                DNS servers (default: inherit, else 1.1.1.1).
+  --ntp time.cloudflare.com    NTP host (default: time.cloudflare.com).
   --ssh-port 22                SSH port (default: 22).
   --install "git htop"         Install extra official packages.
   --kernel linux               Kernel package: linux or linux-lts (default:
@@ -152,6 +153,10 @@ is_uint() (
     esac
 )
 
+# Spelled out field by field rather than with an /(...){3}/ interval: mawk is
+# the default awk on Debian and did not support interval expressions before
+# 1.3.4-20240123, where the regex silently never matches and every address is
+# rejected.
 is_ipv4() (
     printf '%s\n' "$1" | LC_ALL=C awk -F. '
         NF != 4 { exit 1 }
@@ -164,30 +169,31 @@ is_ipv4() (
 )
 
 validate_dns_servers() (
-    [ -n "$1" ] || die 'At least one IPv4 DNS server is required'
-    # Spelled out field by field rather than with an /(...){3}/ interval: mawk
-    # is the default awk on Debian and did not support interval expressions
-    # before 1.3.4-20240123, where the regex silently never matches and every
-    # address is rejected.
-    printf '%s\n' "$1" | LC_ALL=C awk '
-        {
-            count += NF
-            for (i = 1; i <= NF; i++) {
-                if (split($i, octets, ".") != 4) exit 1
-                for (j = 1; j <= 4; j++) {
-                    if (octets[j] !~ /^[0-9]+$/ || length(octets[j]) > 3 ||
-                        octets[j] + 0 > 255) exit 1
-                }
-            }
-        }
-        END { if (count == 0) exit 1 }
-    ' || die "Invalid IPv4 DNS server list: $1"
+    servers=$1 server='' count=0
+    # The list was validated as whitespace-separated words by the caller.
+    # shellcheck disable=SC2086
+    for server in $servers; do
+        is_ipv4 "$server" || die "Invalid IPv4 DNS server list: $servers"
+        count=$((count + 1))
+    done
+    [ "$count" -gt 0 ] || die 'At least one IPv4 DNS server is required'
 )
 
 validate_port() (
     if ! is_uint "$1" || [ "${#1}" -gt 5 ] || [ "$1" -lt 1 ] || [ "$1" -gt 65535 ]; then
         die "Invalid SSH port: $1"
     fi
+)
+
+validate_ntp_host() (
+    printf '%s\n' "$1" | LC_ALL=C grep -Eq \
+        '^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?$' || die "Invalid NTP host: $1"
+)
+
+validate_timezone() (
+    case $1 in
+        *[[:space:]]*|*"'"*|*'"'*|*\\*|*/../*|../*|*/..) die "Invalid timezone: $1" ;;
+    esac
 )
 
 # Length is checked before the numeric comparison so that a caller cannot feed
@@ -382,9 +388,7 @@ detect_bootif() (
 
 prefix_to_netmask() (
     prefix=$1 octet='' bits='' value='' result=''
-    if ! is_uint "$prefix" || [ "${#prefix}" -gt 2 ] || [ "$prefix" -gt 32 ]; then
-        die "Invalid IPv4 prefix: $prefix"
-    fi
+    validate_uint_range 'IPv4 prefix' "$prefix" 32
     for octet in 0 1 2 3; do
         bits=$((prefix - octet * 8))
         if [ "$bits" -ge 8 ]; then
@@ -440,23 +444,12 @@ detect_dns_servers() (
     '
 )
 
+# The caller has always resolved the addressing already, first from the running
+# system and then from --ip and --gateway, so this takes the result rather than
+# probing a second time and re-deriving the same answer.
 build_boot_network_parameter() (
-    interface=$1 hostname=$2 dns=$3 bootif=$4
-    requested_cidr=${5:-} requested_gateway=${6:-}
-    cidr='' address='' prefix='' gateway='' netmask='' dns0='' dns1=''
-    if [ -n "$requested_cidr" ]; then
-        cidr=$requested_cidr
-    else
-        cidr=$(ip -4 -o address show dev "$interface" scope global 2>/dev/null |
-            awk 'NR == 1 { print $4 }')
-    fi
-    if [ -n "$requested_gateway" ]; then
-        gateway=$requested_gateway
-    else
-        gateway=$(ip -4 route show default dev "$interface" 2>/dev/null | awk '
-            { for (i = 1; i <= NF; i++) if ($i == "via") { print $(i + 1); exit } }
-        ')
-    fi
+    hostname=$1 dns=$2 bootif=$3 cidr=$4 gateway=$5
+    address='' prefix='' netmask='' dns0='' dns1=''
     case $cidr in
         */*)
             if [ -n "$gateway" ]; then
@@ -788,6 +781,16 @@ download_file() (
     mv -f -- "$temporary" "$destination"
 )
 
+# Expands the literal $repo/$arch placeholders a pacman mirror carries, which
+# is how a mirror root becomes a URL that can actually be fetched.
+repo_db_url() (
+    mirror=$1 repo=$2
+    # The placeholders stay literal until exactly here.
+    # shellcheck disable=SC2016
+    printf '%s\n' "$mirror" |
+        sed 's|\$repo|'"$repo"'|g; s|\$arch|x86_64|g; s|$|/'"$repo"'.db|'
+)
+
 # Red Hat derivatives ship every GRUB 2 utility under a grub2- prefix, so each
 # one has to be looked up rather than assumed.
 grub_tool() (
@@ -976,6 +979,7 @@ stage_main() (
             --ip) requested_ip=${2:?missing value}; shift 2 ;;
             --gateway) requested_gateway=${2:?missing value}; shift 2 ;;
             --dns) dns=${2:?missing value}; shift 2 ;;
+            --ntp) ntp=${2:?missing value}; shift 2 ;;
             --ssh-port) ssh_port=${2:?missing value}; shift 2 ;;
             --bbr) bbr=true; shift ;;
             --no-bbr) bbr=false; shift ;;
@@ -1062,15 +1066,14 @@ stage_main() (
     validate_hostname "$hostname"
     validate_packages "$extra_packages"
     validate_port "$ssh_port"
-    printf '%s\n' "$ntp" | LC_ALL=C grep -Eq \
-        '^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?$' || die "Invalid NTP host: $ntp"
+    validate_ntp_host "$ntp"
     [ "$requested_interface" = auto ] || printf '%s\n' "$requested_interface" |
         LC_ALL=C grep -Eq '^[A-Za-z0-9_.:-]+$' || die "Invalid interface name: $requested_interface"
     validate_uint_range '--swap-mib' "$swap_mib" 1048576
     validate_uint_range '--grub-timeout' "$grub_timeout" 60
     case $boot_mode in auto|bios|efi) ;; *) die '--boot-mode must be auto, bios, or efi' ;; esac
     case $kernel in linux|linux-lts) ;; *) die '--kernel must be linux or linux-lts' ;; esac
-    case $timezone in *[[:space:]]*|*"'"*|*'"'*|*\\*) die 'Invalid timezone' ;; esac
+    validate_timezone "$timezone"
     safe_install_dir "$install_dir"
 
     if [ -z "$disk" ]; then disk=$(detect_root_disk); fi
@@ -1127,9 +1130,7 @@ stage_main() (
         case $requested_ip in */*) ;; *) die '--ip requires ADDRESS/CIDR' ;; esac
         requested_address=${requested_ip%/*} requested_prefix=${requested_ip#*/}
         is_ipv4 "$requested_address" || die "Invalid static IPv4 address: $requested_address"
-        if ! is_uint "$requested_prefix" || [ "${#requested_prefix}" -gt 2 ] || [ "$requested_prefix" -gt 32 ]; then
-            die "Invalid IPv4 prefix: $requested_prefix"
-        fi
+        validate_uint_range 'IPv4 prefix' "$requested_prefix" 32
         boot_cidr=$requested_ip
     fi
     if [ -n "$requested_gateway" ]; then
@@ -1141,7 +1142,7 @@ stage_main() (
         *) warn 'A complete static IPv4 configuration was not found; Alpine will use DHCP' ;;
     esac
     boot_network=''
-    boot_network=$(build_boot_network_parameter "$boot_interface" 'alpine' "$dns" "$bootif" \
+    boot_network=$(build_boot_network_parameter 'alpine' "$dns" "$bootif" \
         "$boot_cidr" "$boot_gateway")
 
     payload_sha=''
@@ -1154,13 +1155,8 @@ stage_main() (
     modloop_url="$netboot_url/modloop-virt"
     apk_main_url="$alpine_mirror/latest-stable/main/x86_64/APKINDEX.tar.gz"
     apk_community_url="$alpine_mirror/latest-stable/community/x86_64/APKINDEX.tar.gz"
-    # Pacman placeholders must remain literal until this substitution.
-    # shellcheck disable=SC2016
-    core_url=$(printf '%s\n' "$package_mirror" | sed 's|\$repo|core|g; s|\$arch|x86_64|g')
-    core_url="$core_url/core.db"
-    # shellcheck disable=SC2016
-    extra_url=$(printf '%s\n' "$package_mirror" | sed 's|\$repo|extra|g; s|\$arch|x86_64|g')
-    extra_url="$extra_url/extra.db"
+    core_url=$(repo_db_url "$package_mirror" core)
+    extra_url=$(repo_db_url "$package_mirror" extra)
 
     probe_install_sources "$kernel_url" "$initramfs_url" "$modloop_url" \
         "$apk_main_url" "$apk_community_url" "$core_url" "$extra_url"
@@ -1545,9 +1541,8 @@ installer_main() (
     case $ethx in true|false) ;; *) die 'Invalid ethx setting' ;; esac
     case $hold in 0|1) ;; *) die 'Invalid hold setting' ;; esac
     validate_uint_range 'GRUB timeout' "$grub_timeout" 60
-    printf '%s\n' "$ntp" | LC_ALL=C grep -Eq \
-        '^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?$' || die 'Invalid NTP host'
-    case $timezone in *[[:space:]]*|*"'"*|*'"'*|*\\*) die 'Invalid timezone' ;; esac
+    validate_ntp_host "$ntp"
+    validate_timezone "$timezone"
     [ -e "/usr/share/zoneinfo/$timezone" ] || die "Unknown timezone: $timezone"
     if [ -n "$authorized_key" ]; then
         authorized_key=$(first_public_key_text "$authorized_key")
@@ -1564,9 +1559,7 @@ installer_main() (
         case $boot_cidr in
             */*)
                 is_ipv4 "${boot_cidr%/*}" || die 'Invalid inherited static IPv4 address'
-                boot_prefix=${boot_cidr#*/}
-                is_uint "$boot_prefix" && [ "${#boot_prefix}" -le 2 ] &&
-                    [ "$boot_prefix" -le 32 ] || die 'Invalid inherited IPv4 prefix'
+                validate_uint_range 'inherited IPv4 prefix' "${boot_cidr#*/}" 32
                 ;;
             *) die 'Invalid inherited static IPv4 configuration' ;;
         esac
@@ -1583,34 +1576,18 @@ installer_main() (
     # explicitly below.
     umask 022
 
-    printf '%s\n' 'alpine' > /etc/hostname
-    chmod 0644 /etc/hostname
-    hostname alpine
-
-    if [ -n "$authorized_key" ]; then
-        install -d -m 0700 /root/.ssh
-        printf '%s\n' "$authorized_key" > /root/.ssh/authorized_keys
-        chmod 0600 /root/.ssh/authorized_keys
-    fi
+    # The Alpine hostname, /root/.ssh/authorized_keys and the sshd drop-in all
+    # came out of the apkovl before archi-init started sshd with them, so there
+    # is nothing left to set up here. Only the installed system is built below.
     permit_root_login='' password_auth=''
     # sshd_auth_mode emits exactly two whitespace-free fields.
     # shellcheck disable=SC2046
     set -- $(sshd_auth_mode "$authorized_key")
     permit_root_login=$1 password_auth=$2
-    # The apkovl already shipped this file and archi-init started sshd with it;
-    # rewriting it keeps the two in step if the config ever grows a value that
-    # only the installer knows, and matters when installer_exit restarts sshd.
-    install -d -m 0755 /etc/ssh/sshd_config.d
-    write_sshd_config /etc/ssh/sshd_config.d/60-archi-root-auth.conf \
-        "$ssh_port" "$permit_root_login" "$password_auth"
 
     install -d -m 0755 /etc/pacman.d
     printf 'Server = %s\n' "$package_mirror" > /etc/pacman.d/mirrorlist
-    core_url=''
-    # Pacman placeholders must remain literal until this substitution.
-    # shellcheck disable=SC2016
-    core_url=$(printf '%s\n' "$package_mirror" | sed 's|\$repo|core|g; s|\$arch|x86_64|g')
-    probe_url 'pacman core repository' "$core_url/core.db"
+    probe_url 'pacman core repository' "$(repo_db_url "$package_mirror" core)"
 
     root_ssh_authentication=password
     [ -n "$authorized_key" ] && root_ssh_authentication='key only'

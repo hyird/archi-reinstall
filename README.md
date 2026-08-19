@@ -30,6 +30,7 @@ sh /tmp/archi.sh --authorized-key /root/.ssh/authorized_keys
 | `--ip 192.0.2.10/24` | 继承当前配置 | 设置静态 IPv4 地址 |
 | `--gateway 192.0.2.1` | 继承当前配置 | 设置 IPv4 网关 |
 | `--dns 1.1.1.1` | 继承当前配置，否则 `1.1.1.1 1.0.0.1` | 设置 DNS 服务器 |
+| `--ntp ntp.aliyun.com` | `time.cloudflare.com` | 设置 NTP 服务器 |
 | `--ssh-port 22` | `22` | 设置 SSH 端口 |
 | `--no-ethx` | `eth0` 命名已开启 | 保留 `ens3` 之类的可预测网卡名 |
 | `--install "git htop"` | — | 安装额外官方仓库软件包 |
