@@ -11,36 +11,37 @@
 
 ```sh
 curl -fsSLo /tmp/archi.sh https://raw.githubusercontent.com/hyird/archi-reinstall/main/archi.sh
-sh /tmp/archi.sh --authorized-key /root/.ssh/authorized_keys
+sh /tmp/archi.sh --ssh-key /root/.ssh/authorized_keys
 ```
 
-必须提供 `--authorized-key` 或 `--password`。两者同时提供时禁用 SSH 密码登录，仅允许公钥登录。Alpine 临时环境和目标系统都会按同样规则应用到 `root` 账号。
+必须提供 `--ssh-key` 或 `--password`。两者同时提供时禁用 SSH 密码登录，仅允许公钥登录。Alpine 临时环境和目标系统都会按同样规则应用到 `root` 账号。
 
 ## 常用选项
 
 | 选项 | 默认值 | 说明 |
 |---|---|---|
 | `--disk /dev/vda` | 自动探测 | 指定要清空的整块磁盘 |
-| `--authorized-key /root/.ssh/authorized_keys` | — | 使用公钥文本、文件路径或 URL |
+| `--ssh-key "ssh-ed25519 AAAA..."` | — | 使用公钥文本、文件路径或 URL |
 | `--password 'Archi-2026!'` | — | 设置 root 密码 |
 | `--password-file /root/pw` | — | 从文件读取 root 密码，避免进入 shell 历史和 `ps` |
 | `--hostname arch` | `arch` | 设置主机名 |
 | `--timezone Asia/Shanghai` | `Asia/Shanghai` | 设置时区 |
-| `--interface eth0` | 默认路由所在网卡 | 指定用于引导的网卡 |
+| `--iface eth0` | 默认路由所在网卡 | 指定用于引导的网卡 |
 | `--ip 192.0.2.10/24` | 继承当前配置 | 设置静态 IPv4 地址 |
 | `--gateway 192.0.2.1` | 继承当前配置 | 设置 IPv4 网关 |
 | `--dns 1.1.1.1` | 继承当前配置，否则 `1.1.1.1 1.0.0.1` | 设置 DNS 服务器 |
 | `--ntp ntp.aliyun.com` | `time.cloudflare.com` | 设置 NTP 服务器 |
-| `--ssh-port 22` | `22` | 设置 SSH 端口 |
+| `--port 22` | `22` | 设置 SSH 端口 |
 | `--no-ethx` | `eth0` 命名已开启 | 保留 `ens3` 之类的可预测网卡名 |
 | `--install "git htop"` | — | 安装额外官方仓库软件包 |
 | `--kernel linux` | `linux-lts` | 选择内核软件包，可选 `linux` 或 `linux-lts` |
 | `--firmware` | 关闭 | 额外安装 `linux-firmware` 固件包 |
 | `--boot-mode efi` | 自动探测 | 强制使用 `bios` 或 `efi` |
 | `--grub-timeout 5` | `5` | 新系统 GRUB 菜单等待秒数 |
+| `--log-days 15` | `15` | systemd 日志保留天数，`0` 表示沿用 journald 默认 |
 | `--no-bbr` | BBR 已开启 | 不启用 BBR 和高并发网络参数 |
 | `--no-fail2ban` | Fail2ban 已开启 | 不安装 Fail2ban 与 nftables SSH 防护 |
-| `--swap-mib 1024` | `0` | 创建 1024 MiB swap 文件 |
+| `--swap 1024` | `0` | 创建 1024 MiB swap 文件 |
 | `--mirror https://mirrors.cloud.tencent.com/archlinux` | Arch 官方镜像 | 设置 Arch 镜像根地址 |
 | `--alpine-mirror https://mirrors.ustc.edu.cn/alpine` | Alpine 官方镜像 | 设置临时环境使用的 Alpine 镜像根地址 |
 | `--tuna` / `--ustc` / `--aliyun` / `--tencent` | 关闭 | 使用中国大陆镜像和网络服务 |
@@ -60,13 +61,13 @@ sh /tmp/archi.sh --help
 指定磁盘和公钥：
 
 ```sh
-sh /tmp/archi.sh --disk /dev/vda --authorized-key https://github.com/hyird.keys
+sh /tmp/archi.sh --disk /dev/vda --ssh-key https://github.com/hyird.keys
 ```
 
 使用腾讯云镜像：
 
 ```sh
-sh /tmp/archi.sh --tencent --dns 1.1.1.1 --authorized-key /root/.ssh/authorized_keys
+sh /tmp/archi.sh --tencent --dns 1.1.1.1 --ssh-key /root/.ssh/authorized_keys
 ```
 
 手动设置 Arch 镜像：

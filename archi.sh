@@ -65,7 +65,7 @@ Usage:
   archi.sh --cleanup
 
 Options:
-  --authorized-key /root/.ssh/authorized_keys
+  --ssh-key "ssh-ed25519 AAAA..."
                                Root SSH public key, file path, or URL.
   --password 'Archi-2026!'     Root password.
   --password-file /root/pw     Read the root password from a file instead, so
@@ -73,23 +73,25 @@ Options:
   --disk /dev/vda              Whole target disk.
   --hostname arch              Installed hostname (default: arch).
   --timezone Asia/Shanghai     Installed timezone (default: Asia/Shanghai).
-  --interface eth0             Boot interface (default: the default route).
+  --iface eth0                 Boot interface (default: the default route).
   --ip 192.0.2.10/24           Override the inherited static IPv4 address.
   --gateway 192.0.2.1          Override the inherited IPv4 gateway.
   --dns 1.1.1.1                DNS servers (default: inherit, else 1.1.1.1).
   --ntp time.cloudflare.com    NTP host (default: time.cloudflare.com).
-  --ssh-port 22                SSH port (default: 22).
+  --port 22                    SSH port (default: 22).
   --install "git htop"         Install extra official packages.
   --kernel linux               Kernel package: linux or linux-lts (default:
                                linux-lts).
   --firmware                   Also install the linux-firmware bundle.
   --boot-mode efi              Force bios or efi instead of autodetecting.
   --grub-timeout 5             Installed GRUB menu timeout in seconds.
+  --log-days 15                Days of systemd journal to keep (default: 15,
+                               0 leaves journald's own defaults).
   --ethx, --no-ethx            Rename interfaces to eth0 (default) or keep the
                                predictable names.
   --bbr, --no-bbr              Enable TCP BBR (default) or leave the defaults.
   --no-fail2ban                Do not install the default SSH jail.
-  --swap-mib 1024              Swap file size in MiB (default: 0, disabled).
+  --swap 1024                  Swap file size in MiB (default: 0, disabled).
   --mirror https://mirrors.cloud.tencent.com/archlinux
                                Arch mirror root; repository path is appended.
   --alpine-mirror https://dl-cdn.alpinelinux.org/alpine
@@ -745,16 +747,22 @@ first_public_key() (
     first_public_key_text "$(cat "$file")"
 )
 
+# Silent unless something is wrong: a passing check tells the reader nothing
+# they need, and seven URLs scrolling past buries the plan that follows. The
+# label and the URL are printed only for whichever source actually failed.
 probe_url() (
     label=$1 url=$2
-    log "Checking $label: $url"
-    curl --fail --location --silent --show-error \
+    if ! curl --fail --location --silent --show-error \
         --retry 3 --retry-connrefused --connect-timeout 10 --max-time 45 \
-        --range 0-0 --output /dev/null "$url"
+        --range 0-0 --output /dev/null "$url" 2>/dev/null; then
+        warn "Unreachable $label: $url"
+        return 1
+    fi
 )
 
 probe_install_sources() (
     probe_pids='' probe_failed=false
+    log 'Checking the Alpine and Arch installation sources'
     probe_url 'Alpine virt kernel' "$1" & probe_pids="$probe_pids $!"
     probe_url 'Alpine virt initramfs' "$2" & probe_pids="$probe_pids $!"
     probe_url 'Alpine virt modloop' "$3" & probe_pids="$probe_pids $!"
@@ -766,6 +774,7 @@ probe_install_sources() (
         if ! wait "$probe_pid"; then probe_failed=true; fi
     done
     [ "$probe_failed" = false ] || die 'One or more installation sources are unavailable'
+    log 'All installation sources are reachable'
 )
 
 download_file() (
@@ -947,6 +956,7 @@ stage_main() (
     swap_mib=0
     boot_mode='auto'
     grub_timeout=5
+    log_days=15
     install_dir=$DEFAULT_INSTALL_DIR
     hold=false
     dry_run=false cleanup=false
@@ -961,7 +971,9 @@ stage_main() (
             --tencent) alpine_mirror=$TENCENT_ALPINE_MIRROR; package_mirror=$TENCENT_PACKAGE_MIRROR; dns='119.29.29.29'; ntp='time.amazonaws.cn'; shift ;;
             --mirror) package_mirror="$(trim_trailing_slash "${2:?missing value}")/\$repo/os/\$arch"; shift 2 ;;
             --alpine-mirror) alpine_mirror=${2:?missing value}; shift 2 ;;
-            --authorized-key) authorized_key_input=${2:?missing value}; shift 2 ;;
+            # The long spellings stay accepted so that commands written against
+            # earlier versions keep working; only the short ones are documented.
+            --ssh-key|--authorized-key) authorized_key_input=${2:?missing value}; shift 2 ;;
             --password) password=${2:?missing value}; shift 2 ;;
             --password-file)
                 password_file=${2:?missing value}
@@ -975,12 +987,12 @@ stage_main() (
             --disk) disk=${2:?missing value}; shift 2 ;;
             --hostname) hostname=${2:?missing value}; shift 2 ;;
             --timezone) timezone=${2:?missing value}; shift 2 ;;
-            --interface) requested_interface=${2:?missing value}; shift 2 ;;
+            --iface|--interface) requested_interface=${2:?missing value}; shift 2 ;;
             --ip) requested_ip=${2:?missing value}; shift 2 ;;
             --gateway) requested_gateway=${2:?missing value}; shift 2 ;;
             --dns) dns=${2:?missing value}; shift 2 ;;
             --ntp) ntp=${2:?missing value}; shift 2 ;;
-            --ssh-port) ssh_port=${2:?missing value}; shift 2 ;;
+            --port|--ssh-port) ssh_port=${2:?missing value}; shift 2 ;;
             --bbr) bbr=true; shift ;;
             --no-bbr) bbr=false; shift ;;
             --fail2ban) fail2ban=true; shift ;;
@@ -992,8 +1004,9 @@ stage_main() (
             --kernel) kernel=${2:?missing value}; shift 2 ;;
             --boot-mode) boot_mode=${2:?missing value}; shift 2 ;;
             --grub-timeout) grub_timeout=${2:?missing value}; shift 2 ;;
+            --log-days) log_days=${2:?missing value}; shift 2 ;;
             --install) extra_packages=${2:?missing value}; shift 2 ;;
-            --swap-mib) swap_mib=${2:?missing value}; shift 2 ;;
+            --swap|--swap-mib) swap_mib=${2:?missing value}; shift 2 ;;
             --hold) hold=true; shift ;;
             --dry-run) dry_run=true; shift ;;
             --cleanup) cleanup=true; shift ;;
@@ -1044,7 +1057,7 @@ stage_main() (
     if [ -n "$authorized_key_input" ]; then
         case $authorized_key_input in
             http://*|https://*)
-                validate_url '--authorized-key' "$authorized_key_input"
+                validate_url '--ssh-key' "$authorized_key_input"
                 authorized_key_tmp=$(mktemp)
                 download_file "$authorized_key_input" "$authorized_key_tmp" 40
                 authorized_key_file=$authorized_key_tmp
@@ -1059,7 +1072,7 @@ stage_main() (
         esac
     fi
     [ -n "$authorized_key_literal" ] || [ -n "$authorized_key_file" ] || [ -n "$password" ] ||
-        die 'Provide --authorized-key or --password'
+        die 'Provide --ssh-key or --password'
     if printf '%s' "$password" | LC_ALL=C grep -q '[[:cntrl:]:]'; then
         die 'Password contains an unsupported character'
     fi
@@ -1069,8 +1082,9 @@ stage_main() (
     validate_ntp_host "$ntp"
     [ "$requested_interface" = auto ] || printf '%s\n' "$requested_interface" |
         LC_ALL=C grep -Eq '^[A-Za-z0-9_.:-]+$' || die "Invalid interface name: $requested_interface"
-    validate_uint_range '--swap-mib' "$swap_mib" 1048576
+    validate_uint_range '--swap' "$swap_mib" 1048576
     validate_uint_range '--grub-timeout' "$grub_timeout" 60
+    validate_uint_range '--log-days' "$log_days" 3650
     case $boot_mode in auto|bios|efi) ;; *) die '--boot-mode must be auto, bios, or efi' ;; esac
     case $kernel in linux|linux-lts) ;; *) die '--kernel must be linux or linux-lts' ;; esac
     validate_timezone "$timezone"
@@ -1096,7 +1110,7 @@ stage_main() (
     authorized_key='' password_hash=''
     if [ -n "$authorized_key_literal" ]; then
         authorized_key=$(first_public_key_text "$authorized_key_literal")
-        [ -n "$authorized_key" ] || die 'No supported SSH public key found in --authorized-key'
+        [ -n "$authorized_key" ] || die 'No supported SSH public key found in --ssh-key'
     elif [ -n "$authorized_key_file" ]; then
         authorized_key=$(first_public_key "$authorized_key_file")
         [ -n "$authorized_key" ] || die "No supported SSH public key found in $authorized_key_file"
@@ -1193,6 +1207,7 @@ stage_main() (
   eth0 naming:       $ethx
   swap:              ${swap_mib} MiB
   GRUB timeout:      ${grub_timeout}s
+  journal retention: ${log_days} days
   extra packages:    ${extra_packages:-none}
   hold before wipe:  $hold
   stage directory:   $install_dir
@@ -1258,7 +1273,8 @@ EOF
         fail2ban "$fail2ban" \
         firmware "$firmware" \
         ethx "$ethx" \
-        grub_timeout "$grub_timeout"
+        grub_timeout "$grub_timeout" \
+        log_days "$log_days"
 
     build_alpine_initramfs "$install_dir/initramfs-virt.official" \
         "$install_dir/initramfs-virt" "$authorized_key" 'alpine' "$ssh_port" "$dns" \
@@ -1300,6 +1316,7 @@ bbr=$bbr
 fail2ban=$fail2ban
 ethx=$ethx
 grub_timeout=$grub_timeout
+log_days=$log_days
 payload_sha256=$payload_sha
 kernel_sha256=$(sha256_file "$install_dir/vmlinuz-virt")
 initramfs_sha256=$(sha256_file "$install_dir/initramfs-virt")
@@ -1495,7 +1512,7 @@ installer_main() (
 
     disk='' hostname='' timezone='' dns='' authorized_key='' password_hash='' package_mirror='' extra_packages='' kernel='' ntp=''
     boot_mode='' swap_mib='' hold='' boot_cidr='' boot_gateway='' boot_mac=''
-    ssh_port='' bbr='' fail2ban='' firmware='' ethx='' grub_timeout=''
+    ssh_port='' bbr='' fail2ban='' firmware='' ethx='' grub_timeout='' log_days=''
     [ -r "$ARCHI_CONFIG_FILE" ] ||
         die "Installer configuration is missing: $ARCHI_CONFIG_FILE"
     disk=$(config_value disk)
@@ -1520,6 +1537,7 @@ installer_main() (
     firmware=$(config_value firmware)
     ethx=$(config_value ethx)
     grub_timeout=$(config_value grub_timeout)
+    log_days=$(config_value log_days)
 
     validate_hostname "$hostname"
     validate_packages "$extra_packages"
@@ -1541,6 +1559,7 @@ installer_main() (
     case $ethx in true|false) ;; *) die 'Invalid ethx setting' ;; esac
     case $hold in 0|1) ;; *) die 'Invalid hold setting' ;; esac
     validate_uint_range 'GRUB timeout' "$grub_timeout" 60
+    validate_uint_range 'journal retention' "$log_days" 3650
     validate_ntp_host "$ntp"
     validate_timezone "$timezone"
     [ -e "/usr/share/zoneinfo/$timezone" ] || die "Unknown timezone: $timezone"
@@ -1587,7 +1606,8 @@ installer_main() (
 
     install -d -m 0755 /etc/pacman.d
     printf 'Server = %s\n' "$package_mirror" > /etc/pacman.d/mirrorlist
-    probe_url 'pacman core repository' "$(repo_db_url "$package_mirror" core)"
+    probe_url 'pacman core repository' "$(repo_db_url "$package_mirror" core)" ||
+        die 'The Arch package mirror is unreachable from Alpine'
 
     root_ssh_authentication=password
     [ -n "$authorized_key" ] && root_ssh_authentication='key only'
@@ -1743,6 +1763,21 @@ EOF
 blacklist cfg80211
 EOF
     chmod 0644 /mnt/etc/modprobe.d/60-archi-cloud.conf
+
+    if [ "$log_days" -gt 0 ]; then
+        install -d -m 0755 /mnt/etc/systemd/journald.conf.d
+        # Arch's systemd package ships /var/log/journal, so Storage=auto already
+        # means a persistent journal; all that is missing is an age limit.
+        # MaxRetentionSec alone would not give one: journald only drops whole
+        # files, and with the default MaxFileSec of one month the active file
+        # holds far more than the retention window before it is ever rotated.
+        cat > /mnt/etc/systemd/journald.conf.d/60-archi-retention.conf <<EOF
+[Journal]
+MaxRetentionSec=${log_days}day
+MaxFileSec=1day
+EOF
+        chmod 0644 /mnt/etc/systemd/journald.conf.d/60-archi-retention.conf
+    fi
 
     install -d -m 0755 /mnt/etc/systemd/timesyncd.conf.d
     cat > /mnt/etc/systemd/timesyncd.conf.d/60-archi-cloud.conf <<EOF
