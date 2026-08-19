@@ -59,53 +59,53 @@ die() {
 }
 
 usage() (
-    cat <<'EOF'
-Usage:
-  archi.sh [options]
-  archi.sh --cleanup
-
-Options:
-  --ssh-key "ssh-ed25519 AAAA..."
-                               Root SSH public key, file path, or URL.
-  --password 'Archi-2026!'     Root password.
-  --password-file /root/pw     Read the root password from a file instead, so
-                               that it stays out of the shell history and ps.
-  --disk /dev/vda              Whole target disk.
-  --hostname arch              Installed hostname (default: arch).
-  --timezone Asia/Shanghai     Installed timezone (default: Asia/Shanghai).
-  --iface eth0                 Boot interface (default: the default route).
-  --ip 192.0.2.10/24           Override the inherited static IPv4 address.
-  --gateway 192.0.2.1          Override the inherited IPv4 gateway.
-  --dns 1.1.1.1                DNS servers (default: inherit, else 1.1.1.1).
-  --ntp time.cloudflare.com    NTP host (default: time.cloudflare.com).
-  --port 22                    SSH port (default: 22).
-  --install "git htop"         Install extra official packages.
-  --kernel linux               Kernel package: linux or linux-lts (default:
-                               linux-lts).
-  --firmware                   Also install the linux-firmware bundle.
-  --boot-mode efi              Force bios or efi instead of autodetecting.
-  --grub-timeout 5             Installed GRUB menu timeout in seconds.
-  --log-days 15                Days of systemd journal to keep (default: 15,
-                               0 leaves journald's own defaults).
-  --ethx, --no-ethx            Rename interfaces to eth0 (default) or keep the
-                               predictable names.
-  --bbr, --no-bbr              Enable TCP BBR (default) or leave the defaults.
-  --no-fail2ban                Do not install the default SSH jail.
-  --swap 1024                  Swap file size in MiB (default: 0, disabled).
-  --mirror https://mirrors.cloud.tencent.com/archlinux
-                               Arch mirror root; repository path is appended.
-  --alpine-mirror https://dl-cdn.alpinelinux.org/alpine
-                               Alpine mirror root for the temporary environment.
-  --tuna, --ustc, --aliyun     Use a regional mirror preset.
-  --tencent                    Use the Tencent Cloud mirror preset.
-  --hold                       Boot Alpine with SSH, but do not wipe.
-  --dry-run                    Validate and print the plan without changing files.
-  --cleanup                    Remove the staged GRUB entry and downloaded files.
-  --help                       Show this help.
-  --version                    Show script version.
-
-Requires x86_64, GRUB 2, wired IPv4 and root access. The target disk is erased.
-EOF
+    {
+        printf 'Usage:\n'
+        printf '  archi.sh [options]\n'
+        printf '  archi.sh --cleanup\n'
+        printf '\n'
+        printf 'Options:\n'
+        printf '  --ssh-key "ssh-ed25519 AAAA..."\n'
+        printf '                               Root SSH public key, file path, or URL.\n'
+        printf '  --password '\''Archi-2026!'\''     Root password.\n'
+        printf '  --password-file /root/pw     Read the root password from a file instead, so\n'
+        printf '                               that it stays out of the shell history and ps.\n'
+        printf '  --disk /dev/vda              Whole target disk.\n'
+        printf '  --hostname arch              Installed hostname (default: arch).\n'
+        printf '  --timezone Asia/Shanghai     Installed timezone (default: Asia/Shanghai).\n'
+        printf '  --iface eth0                 Boot interface (default: the default route).\n'
+        printf '  --ip 192.0.2.10/24           Override the inherited static IPv4 address.\n'
+        printf '  --gateway 192.0.2.1          Override the inherited IPv4 gateway.\n'
+        printf '  --dns 1.1.1.1                DNS servers (default: inherit, else 1.1.1.1).\n'
+        printf '  --ntp time.cloudflare.com    NTP host (default: time.cloudflare.com).\n'
+        printf '  --port 22                    SSH port (default: 22).\n'
+        printf '  --install "git htop"         Install extra official packages.\n'
+        printf '  --kernel linux               Kernel package: linux or linux-lts (default:\n'
+        printf '                               linux-lts).\n'
+        printf '  --firmware                   Also install the linux-firmware bundle.\n'
+        printf '  --boot-mode efi              Force bios or efi instead of autodetecting.\n'
+        printf '  --grub-timeout 5             Installed GRUB menu timeout in seconds.\n'
+        printf '  --log-days 15                Days of systemd journal to keep (default: 15,\n'
+        printf '                               0 leaves journald'\''s own defaults).\n'
+        printf '  --ethx, --no-ethx            Rename interfaces to eth0 (default) or keep the\n'
+        printf '                               predictable names.\n'
+        printf '  --bbr, --no-bbr              Enable TCP BBR (default) or leave the defaults.\n'
+        printf '  --no-fail2ban                Do not install the default SSH jail.\n'
+        printf '  --swap 1024                  Swap file size in MiB (default: 0, disabled).\n'
+        printf '  --mirror https://mirrors.cloud.tencent.com/archlinux\n'
+        printf '                               Arch mirror root; repository path is appended.\n'
+        printf '  --alpine-mirror https://dl-cdn.alpinelinux.org/alpine\n'
+        printf '                               Alpine mirror root for the temporary environment.\n'
+        printf '  --tuna, --ustc, --aliyun     Use a regional mirror preset.\n'
+        printf '  --tencent                    Use the Tencent Cloud mirror preset.\n'
+        printf '  --hold                       Boot Alpine with SSH, but do not wipe.\n'
+        printf '  --dry-run                    Validate and print the plan without changing files.\n'
+        printf '  --cleanup                    Remove the staged GRUB entry and downloaded files.\n'
+        printf '  --help                       Show this help.\n'
+        printf '  --version                    Show script version.\n'
+        printf '\n'
+        printf 'Requires x86_64, GRUB 2, wired IPv4 and root access. The target disk is erased.\n'
+    }
 )
 
 need_cmd() (
@@ -232,18 +232,18 @@ hash_password() (
 # installed system; keeping one copy keeps them from drifting apart.
 write_sshd_config() (
     path=$1 port=$2 permit_root_login=$3 password_auth=$4
-    cat > "$path" <<EOF
-Port $port
-PermitRootLogin $permit_root_login
-PasswordAuthentication $password_auth
-KbdInteractiveAuthentication no
-PermitEmptyPasswords no
-LoginGraceTime 30
-MaxAuthTries 3
-MaxStartups 10:30:30
-PerSourceMaxStartups 3
-X11Forwarding no
-EOF
+    {
+        printf 'Port %s\n' "$port"
+        printf 'PermitRootLogin %s\n' "$permit_root_login"
+        printf 'PasswordAuthentication %s\n' "$password_auth"
+        printf 'KbdInteractiveAuthentication no\n'
+        printf 'PermitEmptyPasswords no\n'
+        printf 'LoginGraceTime 30\n'
+        printf 'MaxAuthTries 3\n'
+        printf 'MaxStartups 10:30:30\n'
+        printf 'PerSourceMaxStartups 3\n'
+        printf 'X11Forwarding no\n'
+    } > "$path"
     chmod 0644 "$path"
 )
 
@@ -507,25 +507,25 @@ build_alpine_initramfs() (
     # silently had to agree -- and they no longer did. The netboot image already
     # ships a correct world, so overriding it buys nothing.
     # coreutils is listed for numfmt even though arch-install-scripts pulls it.
-    cat > "$apkovl/etc/archi/apk-packages" <<'EOF'
-arch-install-scripts
-archlinux-keyring
-bash
-ca-certificates
-coreutils
-curl
-dosfstools
-e2fsprogs
-findmnt
-gnupg
-lsblk
-openssh
-parted
-sgdisk
-tzdata
-util-linux-misc
-wipefs
-EOF
+    {
+        printf 'arch-install-scripts\n'
+        printf 'archlinux-keyring\n'
+        printf 'bash\n'
+        printf 'ca-certificates\n'
+        printf 'coreutils\n'
+        printf 'curl\n'
+        printf 'dosfstools\n'
+        printf 'e2fsprogs\n'
+        printf 'findmnt\n'
+        printf 'gnupg\n'
+        printf 'lsblk\n'
+        printf 'openssh\n'
+        printf 'parted\n'
+        printf 'sgdisk\n'
+        printf 'tzdata\n'
+        printf 'util-linux-misc\n'
+        printf 'wipefs\n'
+    } > "$apkovl/etc/archi/apk-packages"
     cp -f -- "$config_file" "$apkovl/etc/archi/config"
     : > "$apkovl/etc/.default_boot_services"
     printf '%s\n' "$hostname" > "$apkovl/etc/hostname"
@@ -550,158 +550,158 @@ EOF
     printf '%s\n' \
         "$alpine_mirror/latest-stable/releases/x86_64/netboot/modloop-virt" \
         > "$apkovl/etc/archi/modloop-url"
-    cat > "$apkovl/etc/pacman.conf" <<'EOF'
-[options]
-Architecture = auto
-CheckSpace
-ParallelDownloads = 5
-SigLevel = Required DatabaseOptional
-LocalFileSigLevel = Optional
-
-[core]
-Include = /etc/pacman.d/mirrorlist
-
-[extra]
-Include = /etc/pacman.d/mirrorlist
-EOF
+    {
+        printf '[options]\n'
+        printf 'Architecture = auto\n'
+        printf 'CheckSpace\n'
+        printf 'ParallelDownloads = 5\n'
+        printf 'SigLevel = Required DatabaseOptional\n'
+        printf 'LocalFileSigLevel = Optional\n'
+        printf '\n'
+        printf '[core]\n'
+        printf 'Include = /etc/pacman.d/mirrorlist\n'
+        printf '\n'
+        printf '[extra]\n'
+        printf 'Include = /etc/pacman.d/mirrorlist\n'
+    } > "$apkovl/etc/pacman.conf"
     write_sshd_config "$apkovl/etc/ssh/sshd_config.d/60-archi-root-auth.conf" \
         "$ssh_port" "$permit_root_login" "$password_auth"
     if [ -n "$authorized_key" ]; then
         printf '%s\n' "$authorized_key" > "$apkovl/root/.ssh/authorized_keys"
     fi
     cp -f -- "$source_file" "$apkovl/root/archi.sh"
-    cat > "$apkovl/root/archi-init" <<'EOF'
-#!/bin/sh
-set +e
-hostname alpine
-mkdir -p /run/sshd /tmp /var/empty
-ln -sfn /proc/self/fd /dev/fd
-ln -sfn /proc/self/fd/0 /dev/stdin
-ln -sfn /proc/self/fd/1 /dev/stdout
-ln -sfn /proc/self/fd/2 /dev/stderr
-ln -sfn /proc/mounts /etc/mtab
-# Nothing below writes to /dev/console: the consoles belong to the getty logins
-# started further down, and anything printed underneath a waiting getty makes it
-# bail out and reprint its prompt. Progress lives in the log instead, and it has
-# to be the same log /etc/motd and /root/.profile point at -- when setup fails
-# here the installer usually dies later of an unrelated-looking symptom, so the
-# cause has to be in the file the user is actually told to read.
-exec >>/tmp/archi-install.log 2>&1
-echo '[archi] Alpine installer init started.'
-cat > /etc/motd <<'MOTD'
-
-Arch Linux is being installed from this Alpine environment.
-Follow the installation log with:
-
-    tail -f /tmp/archi-install.log
-
-MOTD
-# init=/root/archi-init replaces Alpine's init, so /etc/inittab is never read and
-# nothing spawns a getty. Start one per usable console ourselves, and do it early
-# so the screen -- including a cloud VNC view of it -- offers a login even when a
-# later step fails.
-dmesg -n 1
-for archi_tty in tty1 ttyS0 ttyAMA0; do
-    [ -c "/dev/$archi_tty" ] || continue
-    stty -g -F "/dev/$archi_tty" >/dev/null 2>&1 || continue
-    case $archi_tty in
-        ttyS0 | ttyAMA0) archi_baud=115200 ;;
-        *) archi_baud=0 ;;
-    esac
-    setsid sh -c "while :; do /sbin/getty -L $archi_baud $archi_tty vt100; sleep 2; done" \
-        </dev/null >/dev/null 2>&1 &
-done
-apk del alpine-base alpine-conf >/tmp/archi-apk-remove.log 2>&1
-# shellcheck disable=SC2046
-set -- $(cat /etc/archi/apk-packages)
-apk_rc=1
-apk_attempt=1
-while [ "$apk_attempt" -le 3 ]; do
-    if apk add --no-cache "$@" >/tmp/archi-apk.log 2>&1; then
-        apk_rc=0
-        break
-    fi
-    echo "[archi] APK attempt $apk_attempt/3 failed; retrying."
-    apk_attempt=$((apk_attempt + 1))
-    sleep 3
-done
-echo "[archi] required APK exit status: $apk_rc"
-[ "$apk_rc" -eq 0 ] || cat /tmp/archi-apk.log
-# Alpine mounts the modloop from an OpenRC sysinit service, which init= skips,
-# so this normally has to fetch it. The guard is here so that a future Alpine
-# that does mount it in the initramfs does not get a second ~130 MiB download
-# and a second squashfs stacked on the same mount point.
-if [ -d /.modloop/modules ]; then
-    echo '[archi] modloop is already mounted; skipping the download.'
-    ln -sfn /.modloop/modules /lib/modules
-    modloop_rc=0
-else
-    mkdir -p /.modloop /lib
-    curl --fail --location --retry 5 --retry-all-errors --retry-delay 2 \
-        --connect-timeout 10 --output /tmp/modloop-virt \
-        "$(cat /etc/archi/modloop-url)" >/tmp/archi-modloop.log 2>&1
-    modloop_rc=$?
-    if [ "$modloop_rc" -eq 0 ]; then
-        mount -t squashfs -o loop,ro /tmp/modloop-virt /.modloop
-        ln -sfn /.modloop/modules /lib/modules
-    else
-        echo "[archi] modloop download failed with status $modloop_rc"
-        cat /tmp/archi-modloop.log
-    fi
-fi
-if [ "$modloop_rc" -eq 0 ]; then
-    for module in virtio_scsi virtio_blk sd_mod ahci nvme ext4 vfat; do
-        modprobe "$module" >/dev/null 2>&1 || true
-    done
-    mdev -s >/dev/null 2>&1 || true
-fi
-ssh-keygen -A >/tmp/archi-ssh-keygen.log 2>&1
-ssh_keygen_rc=$?
-echo "[archi] ssh-keygen exit status: $ssh_keygen_rc"
-[ "$ssh_keygen_rc" -eq 0 ] || cat /tmp/archi-ssh-keygen.log
-/usr/sbin/sshd -E /tmp/archi-sshd.log
-sshd_rc=$?
-echo "[archi] sshd exit status: $sshd_rc"
-[ "$sshd_rc" -eq 0 ] || cat /tmp/archi-sshd.log
-echo '[archi] SSH should be ready. Follow installation with: tail -f /tmp/archi-install.log'
-/root/archi.sh </dev/null >>/tmp/archi-install.log 2>&1 &
-installer_pid=$!
-installer_running=1
-# This is PID 1, so it must never exit, and the sleep is spelled as a background
-# job plus wait so that ash reaps whatever got reparented onto it. The guard is
-# an explicit flag rather than installer_pid=0: kill -0 0 signals the whole
-# process group and always succeeds, which only looked like it worked.
-while :; do
-    if [ "$installer_running" = 1 ] && ! kill -0 "$installer_pid" 2>/dev/null; then
-        wait "$installer_pid"
-        installer_rc=$?
-        echo "[archi] Installer exited with status $installer_rc; Alpine remains online."
-        installer_running=0
-    fi
-    sleep 5 &
-    wait $!
-done
-EOF
-    cat > "$apkovl/root/.profile" <<'EOF'
-if [ -n "${SSH_CONNECTION-}" ] && [ -t 1 ]; then
-    echo
-    echo '[archi] Logged in to Alpine installer as root.'
-    echo '[archi] Installation progress follows /tmp/archi-install.log.'
-    echo '[archi] Press Ctrl-C to get a shell.'
-    install_wait=0
-    while [ ! -f /tmp/archi-install.log ] && [ "$install_wait" -lt 15 ]; do
-        sleep 1
-        install_wait=$((install_wait + 1))
-    done
-
-    if [ -f /tmp/archi-install.log ]; then
-        tail -n 80 -f /tmp/archi-install.log
-    else
-        echo "[archi] Waiting for installer log. Run: tail -f /tmp/archi-install.log"
-    fi
-    echo
-fi
-EOF
+    {
+        printf '#!/bin/sh\n'
+        printf 'set +e\n'
+        printf 'hostname alpine\n'
+        printf 'mkdir -p /run/sshd /tmp /var/empty\n'
+        printf 'ln -sfn /proc/self/fd /dev/fd\n'
+        printf 'ln -sfn /proc/self/fd/0 /dev/stdin\n'
+        printf 'ln -sfn /proc/self/fd/1 /dev/stdout\n'
+        printf 'ln -sfn /proc/self/fd/2 /dev/stderr\n'
+        printf 'ln -sfn /proc/mounts /etc/mtab\n'
+        printf '# Nothing below writes to /dev/console: the consoles belong to the getty logins\n'
+        printf '# started further down, and anything printed underneath a waiting getty makes it\n'
+        printf '# bail out and reprint its prompt. Progress lives in the log instead, and it has\n'
+        printf '# to be the same log /etc/motd and /root/.profile point at -- when setup fails\n'
+        printf '# here the installer usually dies later of an unrelated-looking symptom, so the\n'
+        printf '# cause has to be in the file the user is actually told to read.\n'
+        printf 'exec >>/tmp/archi-install.log 2>&1\n'
+        printf 'echo '\''[archi] Alpine installer init started.'\''\n'
+        printf 'cat > /etc/motd <<'\''MOTD'\''\n'
+        printf '\n'
+        printf 'Arch Linux is being installed from this Alpine environment.\n'
+        printf 'Follow the installation log with:\n'
+        printf '\n'
+        printf '    tail -f /tmp/archi-install.log\n'
+        printf '\n'
+        printf 'MOTD\n'
+        printf '# init=/root/archi-init replaces Alpine'\''s init, so /etc/inittab is never read and\n'
+        printf '# nothing spawns a getty. Start one per usable console ourselves, and do it early\n'
+        printf '# so the screen -- including a cloud VNC view of it -- offers a login even when a\n'
+        printf '# later step fails.\n'
+        printf 'dmesg -n 1\n'
+        printf 'for archi_tty in tty1 ttyS0 ttyAMA0; do\n'
+        printf '    [ -c "/dev/$archi_tty" ] || continue\n'
+        printf '    stty -g -F "/dev/$archi_tty" >/dev/null 2>&1 || continue\n'
+        printf '    case $archi_tty in\n'
+        printf '        ttyS0 | ttyAMA0) archi_baud=115200 ;;\n'
+        printf '        *) archi_baud=0 ;;\n'
+        printf '    esac\n'
+        printf '    setsid sh -c "while :; do /sbin/getty -L $archi_baud $archi_tty vt100; sleep 2; done" \\\n'
+        printf '        </dev/null >/dev/null 2>&1 &\n'
+        printf 'done\n'
+        printf 'apk del alpine-base alpine-conf >/tmp/archi-apk-remove.log 2>&1\n'
+        printf '# shellcheck disable=SC2046\n'
+        printf 'set -- $(cat /etc/archi/apk-packages)\n'
+        printf 'apk_rc=1\n'
+        printf 'apk_attempt=1\n'
+        printf 'while [ "$apk_attempt" -le 3 ]; do\n'
+        printf '    if apk add --no-cache "$@" >/tmp/archi-apk.log 2>&1; then\n'
+        printf '        apk_rc=0\n'
+        printf '        break\n'
+        printf '    fi\n'
+        printf '    echo "[archi] APK attempt $apk_attempt/3 failed; retrying."\n'
+        printf '    apk_attempt=$((apk_attempt + 1))\n'
+        printf '    sleep 3\n'
+        printf 'done\n'
+        printf 'echo "[archi] required APK exit status: $apk_rc"\n'
+        printf '[ "$apk_rc" -eq 0 ] || cat /tmp/archi-apk.log\n'
+        printf '# Alpine mounts the modloop from an OpenRC sysinit service, which init= skips,\n'
+        printf '# so this normally has to fetch it. The guard is here so that a future Alpine\n'
+        printf '# that does mount it in the initramfs does not get a second ~130 MiB download\n'
+        printf '# and a second squashfs stacked on the same mount point.\n'
+        printf 'if [ -d /.modloop/modules ]; then\n'
+        printf '    echo '\''[archi] modloop is already mounted; skipping the download.'\''\n'
+        printf '    ln -sfn /.modloop/modules /lib/modules\n'
+        printf '    modloop_rc=0\n'
+        printf 'else\n'
+        printf '    mkdir -p /.modloop /lib\n'
+        printf '    curl --fail --location --retry 5 --retry-all-errors --retry-delay 2 \\\n'
+        printf '        --connect-timeout 10 --output /tmp/modloop-virt \\\n'
+        printf '        "$(cat /etc/archi/modloop-url)" >/tmp/archi-modloop.log 2>&1\n'
+        printf '    modloop_rc=$?\n'
+        printf '    if [ "$modloop_rc" -eq 0 ]; then\n'
+        printf '        mount -t squashfs -o loop,ro /tmp/modloop-virt /.modloop\n'
+        printf '        ln -sfn /.modloop/modules /lib/modules\n'
+        printf '    else\n'
+        printf '        echo "[archi] modloop download failed with status $modloop_rc"\n'
+        printf '        cat /tmp/archi-modloop.log\n'
+        printf '    fi\n'
+        printf 'fi\n'
+        printf 'if [ "$modloop_rc" -eq 0 ]; then\n'
+        printf '    for module in virtio_scsi virtio_blk sd_mod ahci nvme ext4 vfat; do\n'
+        printf '        modprobe "$module" >/dev/null 2>&1 || true\n'
+        printf '    done\n'
+        printf '    mdev -s >/dev/null 2>&1 || true\n'
+        printf 'fi\n'
+        printf 'ssh-keygen -A >/tmp/archi-ssh-keygen.log 2>&1\n'
+        printf 'ssh_keygen_rc=$?\n'
+        printf 'echo "[archi] ssh-keygen exit status: $ssh_keygen_rc"\n'
+        printf '[ "$ssh_keygen_rc" -eq 0 ] || cat /tmp/archi-ssh-keygen.log\n'
+        printf '/usr/sbin/sshd -E /tmp/archi-sshd.log\n'
+        printf 'sshd_rc=$?\n'
+        printf 'echo "[archi] sshd exit status: $sshd_rc"\n'
+        printf '[ "$sshd_rc" -eq 0 ] || cat /tmp/archi-sshd.log\n'
+        printf 'echo '\''[archi] SSH should be ready. Follow installation with: tail -f /tmp/archi-install.log'\''\n'
+        printf '/root/archi.sh </dev/null >>/tmp/archi-install.log 2>&1 &\n'
+        printf 'installer_pid=$!\n'
+        printf 'installer_running=1\n'
+        printf '# This is PID 1, so it must never exit, and the sleep is spelled as a background\n'
+        printf '# job plus wait so that ash reaps whatever got reparented onto it. The guard is\n'
+        printf '# an explicit flag rather than installer_pid=0: kill -0 0 signals the whole\n'
+        printf '# process group and always succeeds, which only looked like it worked.\n'
+        printf 'while :; do\n'
+        printf '    if [ "$installer_running" = 1 ] && ! kill -0 "$installer_pid" 2>/dev/null; then\n'
+        printf '        wait "$installer_pid"\n'
+        printf '        installer_rc=$?\n'
+        printf '        echo "[archi] Installer exited with status $installer_rc; Alpine remains online."\n'
+        printf '        installer_running=0\n'
+        printf '    fi\n'
+        printf '    sleep 5 &\n'
+        printf '    wait $!\n'
+        printf 'done\n'
+    } > "$apkovl/root/archi-init"
+    {
+        printf 'if [ -n "${SSH_CONNECTION-}" ] && [ -t 1 ]; then\n'
+        printf '    echo\n'
+        printf '    echo '\''[archi] Logged in to Alpine installer as root.'\''\n'
+        printf '    echo '\''[archi] Installation progress follows /tmp/archi-install.log.'\''\n'
+        printf '    echo '\''[archi] Press Ctrl-C to get a shell.'\''\n'
+        printf '    install_wait=0\n'
+        printf '    while [ ! -f /tmp/archi-install.log ] && [ "$install_wait" -lt 15 ]; do\n'
+        printf '        sleep 1\n'
+        printf '        install_wait=$((install_wait + 1))\n'
+        printf '    done\n'
+        printf '\n'
+        printf '    if [ -f /tmp/archi-install.log ]; then\n'
+        printf '        tail -n 80 -f /tmp/archi-install.log\n'
+        printf '    else\n'
+        printf '        echo "[archi] Waiting for installer log. Run: tail -f /tmp/archi-install.log"\n'
+        printf '    fi\n'
+        printf '    echo\n'
+        printf 'fi\n'
+    } > "$apkovl/root/.profile"
     chmod 0700 "$apkovl/root/archi-init"
     find "$apkovl" -type d -exec chmod 0755 {} +
     chmod 0700 "$apkovl/root" "$apkovl/root/.ssh" "$apkovl/root/archi.sh" \
@@ -1184,34 +1184,32 @@ stage_main() (
         root_authentication='password'
     fi
 
-    cat <<EOF
-[archi] Installation plan
-  target disk:       $disk (WILL BE ERASED AFTER REBOOT)
-  boot mode:         $boot_mode
-  hostname:          $hostname
-  installer hostname: alpine
-  timezone:          $timezone
-  NTP:               $ntp
-  Alpine mirror:     $alpine_mirror
-  package mirror:    $package_mirror
-  boot interface:    $boot_interface (${bootif#01-})
-  boot network:      $boot_network
-  DNS servers:       $dns
-  payload SHA-256:   $payload_sha
-  root authentication: $root_authentication
-  SSH port:          $ssh_port
-  kernel package:    $kernel
-  firmware bundle:   $firmware
-  TCP BBR:           $bbr
-  Fail2ban:          $fail2ban
-  eth0 naming:       $ethx
-  swap:              ${swap_mib} MiB
-  GRUB timeout:      ${grub_timeout}s
-  journal retention: ${log_days} days
-  extra packages:    ${extra_packages:-none}
-  hold before wipe:  $hold
-  stage directory:   $install_dir
-EOF
+    printf '[archi] Installation plan\n'
+    printf '  target disk:       %s (WILL BE ERASED AFTER REBOOT)\n' "$disk"
+    printf '  boot mode:         %s\n' "$boot_mode"
+    printf '  hostname:          %s\n' "$hostname"
+    printf '  installer hostname: alpine\n'
+    printf '  timezone:          %s\n' "$timezone"
+    printf '  NTP:               %s\n' "$ntp"
+    printf '  Alpine mirror:     %s\n' "$alpine_mirror"
+    printf '  package mirror:    %s\n' "$package_mirror"
+    printf '  boot interface:    %s (%s)\n' "$boot_interface" "${bootif#01-}"
+    printf '  boot network:      %s\n' "$boot_network"
+    printf '  DNS servers:       %s\n' "$dns"
+    printf '  payload SHA-256:   %s\n' "$payload_sha"
+    printf '  root authentication: %s\n' "$root_authentication"
+    printf '  SSH port:          %s\n' "$ssh_port"
+    printf '  kernel package:    %s\n' "$kernel"
+    printf '  firmware bundle:   %s\n' "$firmware"
+    printf '  TCP BBR:           %s\n' "$bbr"
+    printf '  Fail2ban:          %s\n' "$fail2ban"
+    printf '  eth0 naming:       %s\n' "$ethx"
+    printf '  swap:              %s MiB\n' "$swap_mib"
+    printf '  GRUB timeout:      %ss\n' "$grub_timeout"
+    printf '  journal retention: %s days\n' "$log_days"
+    printf '  extra packages:    %s\n' "${extra_packages:-none}"
+    printf '  hold before wipe:  %s\n' "$hold"
+    printf '  stage directory:   %s\n' "$install_dir"
     if [ "$dry_run" = true ]; then
         log 'Dry run completed; no files or boot settings were changed'
         return 0
@@ -1295,32 +1293,32 @@ EOF
     grub_kernel="$grub_prefix$grub_stage_dir/vmlinuz-virt"
     grub_initramfs="$grub_prefix$grub_stage_dir/initramfs-virt"
 
-    cat > "$install_dir/manifest" <<EOF
-ARCHI_PAYLOAD_ID=$ARCHI_PAYLOAD_ID
-version=$ARCHI_VERSION
-created=$(date -Is)
-disk=$disk
-boot_mode=$boot_mode
-boot_interface=$boot_interface
-bootif=$bootif
-boot_network=$boot_network
-alpine_mirror=$alpine_mirror
-package_mirror=$package_mirror
-hostname=$hostname
-timezone=$timezone
-ntp=$ntp
-ssh_port=$ssh_port
-kernel=$kernel
-firmware=$firmware
-bbr=$bbr
-fail2ban=$fail2ban
-ethx=$ethx
-grub_timeout=$grub_timeout
-log_days=$log_days
-payload_sha256=$payload_sha
-kernel_sha256=$(sha256_file "$install_dir/vmlinuz-virt")
-initramfs_sha256=$(sha256_file "$install_dir/initramfs-virt")
-EOF
+    {
+        printf 'ARCHI_PAYLOAD_ID=%s\n' "$ARCHI_PAYLOAD_ID"
+        printf 'version=%s\n' "$ARCHI_VERSION"
+        printf 'created=%s\n' "$(date -Is)"
+        printf 'disk=%s\n' "$disk"
+        printf 'boot_mode=%s\n' "$boot_mode"
+        printf 'boot_interface=%s\n' "$boot_interface"
+        printf 'bootif=%s\n' "$bootif"
+        printf 'boot_network=%s\n' "$boot_network"
+        printf 'alpine_mirror=%s\n' "$alpine_mirror"
+        printf 'package_mirror=%s\n' "$package_mirror"
+        printf 'hostname=%s\n' "$hostname"
+        printf 'timezone=%s\n' "$timezone"
+        printf 'ntp=%s\n' "$ntp"
+        printf 'ssh_port=%s\n' "$ssh_port"
+        printf 'kernel=%s\n' "$kernel"
+        printf 'firmware=%s\n' "$firmware"
+        printf 'bbr=%s\n' "$bbr"
+        printf 'fail2ban=%s\n' "$fail2ban"
+        printf 'ethx=%s\n' "$ethx"
+        printf 'grub_timeout=%s\n' "$grub_timeout"
+        printf 'log_days=%s\n' "$log_days"
+        printf 'payload_sha256=%s\n' "$payload_sha"
+        printf 'kernel_sha256=%s\n' "$(sha256_file "$install_dir/vmlinuz-virt")"
+        printf 'initramfs_sha256=%s\n' "$(sha256_file "$install_dir/initramfs-virt")"
+    } > "$install_dir/manifest"
 
     # Append the entry through custom.cfg instead of adding a /etc/grub.d script
     # and regenerating. Regeneration rewrites the whole boot configuration of a
@@ -1358,33 +1356,37 @@ EOF
     # on it when it managed to load that file. Where GRUB's prefix sits on the
     # EFI partition but grubenv lives under /boot, it silently does not, and the
     # machine quietly boots the old system instead. Borrowed from reinstall.sh.
-cat > "$custom_cfg" <<EOF
-# ARCHI_PAYLOAD_ID=$ARCHI_PAYLOAD_ID
-# Written by archi.sh. Remove with: archi.sh --cleanup
-if ! [ -s \$prefix/grubenv ]; then
-    for archi_dir in /boot/grub /boot/grub2 /grub /grub2; do
-        set archi_grubenv="(\$root)\$archi_dir/grubenv"
-        if [ -s \$archi_grubenv ]; then
-            load_env --file \$archi_grubenv
-            if [ "\${next_entry}" ]; then
-                set default="\${next_entry}"
-                set next_entry=
-                save_env --file \$archi_grubenv next_entry
-            fi
-        fi
-    done
-fi
-# --unrestricted so that the entry still boots under a password-protected menu.
-menuentry 'Arch Linux network reinstall (ERASES TARGET DISK)' --id archi --unrestricted {
-    insmod part_gpt
-    insmod part_msdos
-    insmod lvm
-    insmod all_video
-$grub_insmod$grub_btrfs_path    search --no-floppy --file --set=root $grub_kernel
-    linux $grub_kernel modules=loop,squashfs,sd_mod,usb_storage,virtio_scsi,virtio_blk alpine_repo=$alpine_mirror/latest-stable/main,$alpine_mirror/latest-stable/community apkovl=/archi.apkovl.tar.gz init=/root/archi-init $boot_network archi_mode=install archi_payload_sha256=$payload_sha
-    initrd $grub_initramfs
-}
-EOF
+    # Single-quoted printf formats, so the $ of every GRUB variable below is
+    # already literal and needs no shell escaping of its own.
+    {
+        printf '# ARCHI_PAYLOAD_ID=%s\n' "$ARCHI_PAYLOAD_ID"
+        printf '# Written by archi.sh. Remove with: archi.sh --cleanup\n'
+        printf 'if ! [ -s $prefix/grubenv ]; then\n'
+        printf '    for archi_dir in /boot/grub /boot/grub2 /grub /grub2; do\n'
+        printf '        set archi_grubenv="($root)$archi_dir/grubenv"\n'
+        printf '        if [ -s $archi_grubenv ]; then\n'
+        printf '            load_env --file $archi_grubenv\n'
+        printf '            if [ "${next_entry}" ]; then\n'
+        printf '                set default="${next_entry}"\n'
+        printf '                set next_entry=\n'
+        printf '                save_env --file $archi_grubenv next_entry\n'
+        printf '            fi\n'
+        printf '        fi\n'
+        printf '    done\n'
+        printf 'fi\n'
+        printf '# --unrestricted so that the entry still boots under a password-protected menu.\n'
+        printf 'menuentry '\''Arch Linux network reinstall (ERASES TARGET DISK)'\'' --id archi --unrestricted {\n'
+        printf '    insmod part_gpt\n'
+        printf '    insmod part_msdos\n'
+        printf '    insmod lvm\n'
+        printf '    insmod all_video\n'
+        printf '%s%s    search --no-floppy --file --set=root %s\n' \
+            "$grub_insmod" "$grub_btrfs_path" "$grub_kernel"
+        printf '    linux %s modules=loop,squashfs,sd_mod,usb_storage,virtio_scsi,virtio_blk alpine_repo=%s/latest-stable/main,%s/latest-stable/community apkovl=/archi.apkovl.tar.gz init=/root/archi-init %s archi_mode=install archi_payload_sha256=%s\n' \
+            "$grub_kernel" "$alpine_mirror" "$alpine_mirror" "$boot_network" "$payload_sha"
+        printf '    initrd %s\n' "$grub_initramfs"
+        printf '}\n'
+    } > "$custom_cfg"
     # GRUB reads the filesystem directly and ignores these bits, so tightening
     # them costs nothing; on a vfat ESP the chmod simply cannot take effect.
     chmod 0600 "$custom_cfg" 2>/dev/null || true
@@ -1611,20 +1613,19 @@ installer_main() (
 
     root_ssh_authentication=password
     [ -n "$authorized_key" ] && root_ssh_authentication='key only'
-    cat <<EOF
-[archi] Verified install plan inside Alpine
-  disk:             $disk (size $(numfmt --to=iec "$(blockdev --getsize64 "$disk")"))
-  boot mode:        $boot_mode
-  hostname:         $hostname
-  package mirror:   $package_mirror
-  root SSH:         $root_ssh_authentication
-  SSH port:         $ssh_port
-  NTP:              $ntp
-  firmware bundle:  $firmware
-  TCP BBR:          $bbr
-  Fail2ban:         $fail2ban
-  swap:             ${swap_mib} MiB
-EOF
+    printf '[archi] Verified install plan inside Alpine\n'
+    printf '  disk:             %s (size %s)\n' \
+        "$disk" "$(numfmt --to=iec "$(blockdev --getsize64 "$disk")")"
+    printf '  boot mode:        %s\n' "$boot_mode"
+    printf '  hostname:         %s\n' "$hostname"
+    printf '  package mirror:   %s\n' "$package_mirror"
+    printf '  root SSH:         %s\n' "$root_ssh_authentication"
+    printf '  SSH port:         %s\n' "$ssh_port"
+    printf '  NTP:              %s\n' "$ntp"
+    printf '  firmware bundle:  %s\n' "$firmware"
+    printf '  TCP BBR:          %s\n' "$bbr"
+    printf '  Fail2ban:         %s\n' "$fail2ban"
+    printf '  swap:             %s MiB\n' "$swap_mib"
 
     if [ "$hold" = 1 ] && [ "${ARCHI_FORCE_INSTALL:-0}" != 1 ]; then
         log 'Hold mode is active; no disk changes were made.'
