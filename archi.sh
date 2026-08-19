@@ -1771,11 +1771,8 @@ EOF
         # MaxRetentionSec alone would not give one: journald only drops whole
         # files, and with the default MaxFileSec of one month the active file
         # holds far more than the retention window before it is ever rotated.
-        cat > /mnt/etc/systemd/journald.conf.d/60-archi-retention.conf <<EOF
-[Journal]
-MaxRetentionSec=${log_days}day
-MaxFileSec=1day
-EOF
+        printf '[Journal]\nMaxRetentionSec=%sday\nMaxFileSec=1day\n' "$log_days" \
+            > /mnt/etc/systemd/journald.conf.d/60-archi-retention.conf
         chmod 0644 /mnt/etc/systemd/journald.conf.d/60-archi-retention.conf
     fi
 
