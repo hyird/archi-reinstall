@@ -13,7 +13,7 @@ umask 077
 # Functions use POSIX subshell bodies where variable isolation is required.
 
 readonly ARCHI_PAYLOAD_ID='archi-network-reinstall-v1'
-readonly ARCHI_VERSION='0.11.0'
+readonly ARCHI_VERSION='0.11.1'
 readonly ARCHI_RAW_URL='https://raw.githubusercontent.com/hyird/archi-reinstall/main/archi.sh'
 ARCHI_SOURCE_FILE=$0
 readonly DEFAULT_ALPINE_MIRROR='https://dl-cdn.alpinelinux.org/alpine'
@@ -519,11 +519,13 @@ build_alpine_initramfs() (
         printf 'findmnt\n'
         printf 'gnupg\n'
         printf 'lsblk\n'
+        printf 'mount\n'
         printf 'openssh\n'
         printf 'parted\n'
         printf 'sgdisk\n'
         printf 'tzdata\n'
         printf 'util-linux-misc\n'
+        printf 'umount\n'
         printf 'wipefs\n'
     } > "$apkovl/etc/archi/apk-packages"
     cp -f -- "$config_file" "$apkovl/etc/archi/config"
@@ -539,6 +541,10 @@ build_alpine_initramfs() (
         printf 'sshd:x:22:\n'
     } > "$apkovl/etc/group"
     printf 'root:%s:%s:0:99999:7:::\n' "$shadow_password" "$shadow_last_change" > "$apkovl/etc/shadow"
+    # Alpine 3.24 installs alpine-base's default fstab late in initramfs-init.
+    # Without our own fstab it then tries to relocate the already-consumed
+    # embedded apkovl and emits misleading df/stat warnings on the console.
+    : > "$apkovl/etc/fstab"
     : > "$apkovl/etc/resolv.conf"
     for dns_server in $dns; do
         printf 'nameserver %s\n' "$dns_server" >> "$apkovl/etc/resolv.conf"
@@ -611,7 +617,46 @@ build_alpine_initramfs() (
         printf '    setsid sh -c "while :; do /sbin/getty -L $archi_baud $archi_tty vt100; sleep 2; done" \\\n'
         printf '        </dev/null >/dev/null 2>&1 &\n'
         printf 'done\n'
-        printf 'apk del alpine-base alpine-conf >/tmp/archi-apk-remove.log 2>&1\n'
+        printf '# Bring up SSH before the larger installer toolset. If a later package is\n'
+        printf '# renamed or temporarily unavailable, the operator can still collect logs.\n'
+        printf 'ssh_apk_rc=1\n'
+        printf 'ssh_apk_attempt=1\n'
+        printf 'while [ "$ssh_apk_attempt" -le 3 ]; do\n'
+        printf '    if apk add --no-cache ca-certificates openssh >/tmp/archi-ssh-apk.log 2>&1; then\n'
+        printf '        ssh_apk_rc=0\n'
+        printf '        break\n'
+        printf '    fi\n'
+        printf '    echo "[archi] SSH APK attempt $ssh_apk_attempt/3 failed; retrying."\n'
+        printf '    ssh_apk_attempt=$((ssh_apk_attempt + 1))\n'
+        printf '    sleep 3\n'
+        printf 'done\n'
+        printf 'echo "[archi] SSH APK exit status: $ssh_apk_rc"\n'
+        printf '[ "$ssh_apk_rc" -eq 0 ] || cat /tmp/archi-ssh-apk.log\n'
+        printf 'sshd_rc=1\n'
+        printf 'if [ "$ssh_apk_rc" -eq 0 ]; then\n'
+        printf '    ssh-keygen -A >/tmp/archi-ssh-keygen.log 2>&1\n'
+        printf '    ssh_keygen_rc=$?\n'
+        printf '    echo "[archi] ssh-keygen exit status: $ssh_keygen_rc"\n'
+        printf '    [ "$ssh_keygen_rc" -eq 0 ] || cat /tmp/archi-ssh-keygen.log\n'
+        printf '    /usr/sbin/sshd -E /tmp/archi-sshd.log\n'
+        printf '    sshd_rc=$?\n'
+        printf '    echo "[archi] sshd exit status: $sshd_rc"\n'
+        printf '    [ "$sshd_rc" -eq 0 ] || cat /tmp/archi-sshd.log\n'
+        printf 'fi\n'
+        printf 'echo '\''[archi] SSH bootstrap finished. Installing the remaining tools.'\''\n'
+        printf '# apk-tools 3 prunes dependencies when alpine-base is removed. Pin the\n'
+        printf '# live runtime explicitly, then remove alpine-conf so its genfstab does not\n'
+        printf '# conflict with the one from Arch'\''s arch-install-scripts package.\n'
+        printf 'runtime_apk_rc=1\n'
+        printf 'if apk add --no-cache alpine-baselayout alpine-keys alpine-release apk-tools busybox musl openssl \\\n'
+        printf '        >/tmp/archi-runtime-apk.log 2>&1; then\n'
+        printf '    apk del alpine-base alpine-conf >/tmp/archi-apk-remove.log 2>&1\n'
+        printf '    runtime_apk_rc=$?\n'
+        printf 'fi\n'
+        printf 'echo "[archi] runtime package transition exit status: $runtime_apk_rc"\n'
+        printf 'if [ "$runtime_apk_rc" -ne 0 ]; then\n'
+        printf '    cat /tmp/archi-runtime-apk.log /tmp/archi-apk-remove.log 2>/dev/null\n'
+        printf 'fi\n'
         printf '# shellcheck disable=SC2046\n'
         printf 'set -- $(cat /etc/archi/apk-packages)\n'
         printf 'apk_rc=1\n'
@@ -655,18 +700,24 @@ build_alpine_initramfs() (
         printf '    done\n'
         printf '    mdev -s >/dev/null 2>&1 || true\n'
         printf 'fi\n'
-        printf 'ssh-keygen -A >/tmp/archi-ssh-keygen.log 2>&1\n'
-        printf 'ssh_keygen_rc=$?\n'
-        printf 'echo "[archi] ssh-keygen exit status: $ssh_keygen_rc"\n'
-        printf '[ "$ssh_keygen_rc" -eq 0 ] || cat /tmp/archi-ssh-keygen.log\n'
-        printf '/usr/sbin/sshd -E /tmp/archi-sshd.log\n'
-        printf 'sshd_rc=$?\n'
-        printf 'echo "[archi] sshd exit status: $sshd_rc"\n'
-        printf '[ "$sshd_rc" -eq 0 ] || cat /tmp/archi-sshd.log\n'
+        printf '# Retry sshd after the full package pass if the minimal bootstrap failed.\n'
+        printf 'if [ "$sshd_rc" -ne 0 ] && command -v sshd >/dev/null 2>&1; then\n'
+        printf '    ssh-keygen -A >/tmp/archi-ssh-keygen.log 2>&1\n'
+        printf '    /usr/sbin/sshd -E /tmp/archi-sshd.log\n'
+        printf '    sshd_rc=$?\n'
+        printf '    echo "[archi] delayed sshd exit status: $sshd_rc"\n'
+        printf '    [ "$sshd_rc" -eq 0 ] || cat /tmp/archi-sshd.log\n'
+        printf 'fi\n'
         printf 'echo '\''[archi] SSH should be ready. Follow installation with: tail -f /tmp/archi-install.log'\''\n'
-        printf '/root/archi.sh </dev/null >>/tmp/archi-install.log 2>&1 &\n'
-        printf 'installer_pid=$!\n'
-        printf 'installer_running=1\n'
+        printf 'if [ "$runtime_apk_rc" -eq 0 ] && [ "$apk_rc" -eq 0 ] && [ "$modloop_rc" -eq 0 ]; then\n'
+        printf '    /root/archi.sh </dev/null >>/tmp/archi-install.log 2>&1 &\n'
+        printf '    installer_pid=$!\n'
+        printf '    installer_running=1\n'
+        printf 'else\n'
+        printf '    echo '\''[archi] Installer was not started because the Alpine toolset is incomplete.'\''\n'
+        printf '    installer_pid=\n'
+        printf '    installer_running=0\n'
+        printf 'fi\n'
         printf '# This is PID 1, so it must never exit, and the sleep is spelled as a background\n'
         printf '# job plus wait so that ash reaps whatever got reparented onto it. The guard is\n'
         printf '# an explicit flag rather than installer_pid=0: kill -0 0 signals the whole\n'
@@ -714,7 +765,7 @@ build_alpine_initramfs() (
     # The config carries the root password hash, so it stays root-only.
     chmod 0700 "$apkovl/etc/archi"
     chmod 0600 "$apkovl/etc/archi/config"
-    chmod 0644 "$apkovl/etc/hostname" "$apkovl/etc/resolv.conf" \
+    chmod 0644 "$apkovl/etc/hostname" "$apkovl/etc/fstab" "$apkovl/etc/resolv.conf" \
         "$apkovl/etc/passwd" "$apkovl/etc/group" "$apkovl/etc/apk/repositories" \
         "$apkovl/etc/archi/modloop-url" "$apkovl/etc/archi/apk-packages" \
         "$apkovl/etc/pacman.conf" \
@@ -1692,9 +1743,10 @@ installer_main() (
     fi
 
     packages=''
-    # coreutils comes with base, and mkinitcpio uses libarchive rather than cpio.
+    # cpio is kept explicitly so the installed Arch system can stage another
+    # reinstall run; mkinitcpio itself no longer pulls it in.
     packages="base $kernel grub openssh sudo qemu-guest-agent
-        inetutils bash-completion wget curl vim nano"
+        inetutils bash-completion wget curl vim nano cpio"
     [ "$fail2ban" = true ] && packages="$packages fail2ban nftables"
     [ "$firmware" = true ] && packages="$packages linux-firmware"
     if [ "$boot_mode" = efi ]; then packages="$packages efibootmgr"; fi
