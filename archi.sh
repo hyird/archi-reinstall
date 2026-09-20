@@ -13,7 +13,7 @@ umask 077
 # Functions use POSIX subshell bodies where variable isolation is required.
 
 readonly ARCHI_PAYLOAD_ID='archi-network-reinstall-v1'
-readonly ARCHI_VERSION='0.11.1'
+readonly ARCHI_VERSION='0.11.2'
 readonly ARCHI_RAW_URL='https://raw.githubusercontent.com/hyird/archi-reinstall/main/archi.sh'
 ARCHI_SOURCE_FILE=$0
 readonly DEFAULT_ALPINE_MIRROR='https://dl-cdn.alpinelinux.org/alpine'
@@ -683,6 +683,7 @@ build_alpine_initramfs() (
         printf 'else\n'
         printf '    mkdir -p /.modloop /lib\n'
         printf '    curl --fail --location --retry 5 --retry-all-errors --retry-delay 2 \\\n'
+        printf '        --speed-limit 1024 --speed-time 60 --max-time 900 --retry-max-time 1800 \\\n'
         printf '        --connect-timeout 10 --output /tmp/modloop-virt \\\n'
         printf '        "$(cat /etc/archi/modloop-url)" >/tmp/archi-modloop.log 2>&1\n'
         printf '    modloop_rc=$?\n'
@@ -692,6 +693,7 @@ build_alpine_initramfs() (
         printf '    else\n'
         printf '        echo "[archi] modloop download failed with status $modloop_rc"\n'
         printf '        cat /tmp/archi-modloop.log\n'
+        printf '        rm -f /tmp/modloop-virt\n'
         printf '    fi\n'
         printf 'fi\n'
         printf 'if [ "$modloop_rc" -eq 0 ]; then\n'
@@ -829,16 +831,62 @@ probe_install_sources() (
 )
 
 download_file() (
-    url=$1 destination=$2 minimum_bytes=$3 temporary='' size=''
+    download_file_worker "$@"
+)
+
+# Background callers invoke the brace function directly: wrapping a subshell
+# function in another asynchronous shell can hide its PID from signal cleanup.
+download_file_worker() {
+    url=$1 destination=$2 minimum_bytes=$3 temporary='' size='' download_pid=''
     temporary="${destination}.part"
+    trap 'download_status=$?; trap - 0
+        if [ -n "$download_pid" ]; then
+            kill "$download_pid" 2>/dev/null || true
+            wait "$download_pid" 2>/dev/null || true
+        fi
+        rm -f -- "$temporary"
+        exit "$download_status"' 0
+    trap 'exit 129' 1
+    trap 'exit 130' 2
+    trap 'exit 143' 15
     rm -f -- "$temporary"
     log "Downloading $url"
     curl --fail --location --show-error \
         --retry 5 --retry-connrefused --connect-timeout 10 \
-        --output "$temporary" "$url"
+        --speed-limit 1024 --speed-time 60 --max-time 900 --retry-max-time 1800 \
+        --output "$temporary" "$url" &
+    download_pid=$!
+    wait "$download_pid" || die "Download failed: $url"
+    download_pid=''
     size=$(stat -c '%s' "$temporary")
     [ "$size" -ge "$minimum_bytes" ] || die "Downloaded file is unexpectedly small: $url ($size bytes)"
     mv -f -- "$temporary" "$destination"
+}
+
+# Use an empty local database so the Alpine host cannot satisfy dependencies
+# that will be missing on the freshly formatted Arch root.
+preflight_packages() (
+    database=$(mktemp -d)
+    trap 'rm -rf -- "$database"' 0
+    trap 'exit 129' 1
+    trap 'exit 130' 2
+    trap 'exit 143' 15
+    mkdir -p "$database/local"
+    pacman --dbpath "$database" --logfile "$database/pacman.log" -Sy --noconfirm ||
+        die 'Could not refresh package databases before erasing the disk'
+    pacman --dbpath "$database" --logfile "$database/pacman.log" \
+        -Sp --noconfirm --print-format '%n %v' "$@" ||
+        die 'Package resolution failed; the target disk has not been erased'
+)
+
+ensure_target_initramfs() (
+    target_root=$1 target_kernel=$2
+    if [ ! -s "$target_root/boot/initramfs-$target_kernel.img" ]; then
+        warn "Missing initramfs for $target_kernel; building it now"
+        arch-chroot "$target_root" mkinitcpio -P || die 'Could not generate initramfs'
+    fi
+    [ -s "$target_root/boot/initramfs-$target_kernel.img" ] ||
+        die "Initramfs for $target_kernel is still missing or empty"
 )
 
 # Expands the literal $repo/$arch placeholders a pacman mirror carries, which
@@ -985,6 +1033,42 @@ cleanup_stage() (
     fi
 )
 
+# Roll back ordinary staging failures, including a failed grub-reboot call.
+# Backups are retained if restoring them fails, for manual recovery.
+stage_exit() {
+    stage_status=$?
+    trap - 0 1 2 15
+    for stage_pid in ${kernel_download_pid:-} ${initramfs_download_pid:-}; do
+        kill "$stage_pid" 2>/dev/null || true
+        wait "$stage_pid" 2>/dev/null || true
+    done
+    if [ "${stage_committed:-false}" != true ]; then
+        if [ "${custom_changed:-false}" = true ]; then
+            if [ -f "$stage_backup/custom.cfg" ]; then
+                mv -f -- "$stage_backup/custom.cfg" "$custom_cfg" || {
+                    warn "Could not restore custom.cfg; backup: $stage_backup"
+                    exit 1
+                }
+            else
+                rm -f -- "$custom_cfg"
+            fi
+        fi
+        if [ -n "${stage_backup:-}" ] && [ -d "$stage_backup/payload" ]; then
+            rm -rf -- "$install_dir"
+            mv -- "$stage_backup/payload" "$install_dir" || {
+                warn "Could not restore boot files; backup: $stage_backup"
+                exit 1
+            }
+        elif [ "${stage_published:-false}" = true ]; then
+            rm -rf -- "$install_dir"
+        fi
+    fi
+    [ -z "${stage_work:-}" ] || rm -rf -- "$stage_work"
+    [ -z "${stage_backup:-}" ] || rm -rf -- "$stage_backup"
+    rm -f -- "${custom_tmp:-}" "${authorized_key_tmp:-}" "${source_tmp:-}" "${config_tmp:-}"
+    exit "$stage_status"
+}
+
 stage_main() (
     alpine_mirror=$DEFAULT_ALPINE_MIRROR
     package_mirror=$DEFAULT_PACKAGE_MIRROR
@@ -1013,6 +1097,8 @@ stage_main() (
     dry_run=false cleanup=false
     source_tmp='' authorized_key_tmp='' config_tmp='' password_file=''
     source_file=$ARCHI_SOURCE_FILE
+    stage_work='' stage_backup='' custom_tmp=''
+    stage_committed=false stage_published=false custom_changed=false
 
     while [ "$#" -gt 0 ]; do
         case $1 in
@@ -1097,7 +1183,10 @@ stage_main() (
     validate_url '--package-mirror' "$package_mirror"
     # Armed before the first mktemp, otherwise a failed download leaks the
     # temporary file it was writing into.
-    trap 'rm -f -- "${authorized_key_tmp:-}" "${source_tmp:-}" "${config_tmp:-}"' 0
+    trap stage_exit 0
+    trap 'exit 129' 1
+    trap 'exit 130' 2
+    trap 'exit 143' 15
     case $source_file in
         /dev/fd/*|/proc/self/fd/*)
             source_tmp=$(mktemp)
@@ -1273,17 +1362,19 @@ stage_main() (
     if [ -e "$install_dir" ]; then
         is_archi_install_dir "$install_dir" ||
             die "Refusing to replace an unrecognized install directory: $install_dir"
-        rm -rf -- "$install_dir"
     fi
-    mkdir -p -- "$install_dir"
-    printf '%s\n' "$ARCHI_PAYLOAD_ID" > "$install_dir/.archi-owned"
+    # Build beside the destination so publishing uses same-filesystem renames.
+    stage_work=$(mktemp -d "${install_dir}.new.XXXXXX")
+    printf '%s\n' "$ARCHI_PAYLOAD_ID" > "$stage_work/.archi-owned"
     download_failed=false
-    download_file "$kernel_url" "$install_dir/vmlinuz-virt" 5000000 &
+    download_file_worker "$kernel_url" "$stage_work/vmlinuz-virt" 5000000 &
     kernel_download_pid=$!
-    download_file "$initramfs_url" "$install_dir/initramfs-virt.official" 3000000 &
+    download_file_worker "$initramfs_url" "$stage_work/initramfs-virt.official" 3000000 &
     initramfs_download_pid=$!
     if ! wait "$kernel_download_pid"; then download_failed=true; fi
+    kernel_download_pid=''
     if ! wait "$initramfs_download_pid"; then download_failed=true; fi
+    initramfs_download_pid=''
     [ "$download_failed" = false ] || die 'Could not download the Alpine boot files'
 
     boot_mac=''
@@ -1325,14 +1416,14 @@ stage_main() (
         grub_timeout "$grub_timeout" \
         log_days "$log_days"
 
-    build_alpine_initramfs "$install_dir/initramfs-virt.official" \
-        "$install_dir/initramfs-virt" "$authorized_key" 'alpine' "$ssh_port" "$dns" \
+    build_alpine_initramfs "$stage_work/initramfs-virt.official" \
+        "$stage_work/initramfs-virt" "$authorized_key" 'alpine' "$ssh_port" "$dns" \
         "$alpine_mirror" "$password_hash" "$source_file" "$config_tmp"
-    rm -f -- "$install_dir/initramfs-virt.official" "$config_tmp"
+    rm -f -- "$stage_work/initramfs-virt.official" "$config_tmp"
     config_tmp=''
     # The apkovl inside it holds the root password hash and the authorized key.
     # Non-fatal: /boot is sometimes the vfat ESP, which rejects chmod outright.
-    chmod 0600 "$install_dir/initramfs-virt" 2>/dev/null || true
+    chmod 0600 "$stage_work/initramfs-virt" 2>/dev/null || true
 
     grub_prefix='' grub_stage_dir='' grub_kernel='' grub_initramfs=''
     if mountpoint -q /boot; then
@@ -1367,9 +1458,9 @@ stage_main() (
         printf 'grub_timeout=%s\n' "$grub_timeout"
         printf 'log_days=%s\n' "$log_days"
         printf 'payload_sha256=%s\n' "$payload_sha"
-        printf 'kernel_sha256=%s\n' "$(sha256_file "$install_dir/vmlinuz-virt")"
-        printf 'initramfs_sha256=%s\n' "$(sha256_file "$install_dir/initramfs-virt")"
-    } > "$install_dir/manifest"
+        printf 'kernel_sha256=%s\n' "$(sha256_file "$stage_work/vmlinuz-virt")"
+        printf 'initramfs_sha256=%s\n' "$(sha256_file "$stage_work/initramfs-virt")"
+    } > "$stage_work/manifest"
 
     # Append the entry through custom.cfg instead of adding a /etc/grub.d script
     # and regenerating. Regeneration rewrites the whole boot configuration of a
@@ -1382,6 +1473,11 @@ stage_main() (
     grub_cfg_reads_custom "$grub_cfg" ||
         die "This GRUB configuration does not source custom.cfg: $grub_cfg"
     custom_cfg="$(dirname "$grub_cfg")/custom.cfg"
+    stage_backup=$(mktemp -d "${install_dir}.backup.XXXXXX")
+    if [ -e "$custom_cfg" ]; then
+        cp -p -- "$custom_cfg" "$stage_backup/custom.cfg"
+    fi
+    custom_tmp=$(mktemp "${custom_cfg}.new.XXXXXX")
     # Keep whatever the administrator already had there; --cleanup puts it back.
     if [ -e "$custom_cfg" ] &&
         ! LC_ALL=C grep -q "ARCHI_PAYLOAD_ID=$ARCHI_PAYLOAD_ID" "$custom_cfg"; then
@@ -1391,7 +1487,7 @@ stage_main() (
     fi
 
     boot_fstype='' grub_insmod='' grub_btrfs_path=''
-    boot_fstype=$(findmnt -n -o FSTYPE --target "$install_dir" 2>/dev/null || true)
+    boot_fstype=$(findmnt -n -o FSTYPE --target "$stage_work" 2>/dev/null || true)
     for grub_fs in $(grub_fs_module "$boot_fstype"); do
         grub_insmod="$grub_insmod    insmod $grub_fs
 "
@@ -1437,10 +1533,17 @@ stage_main() (
             "$grub_kernel" "$alpine_mirror" "$alpine_mirror" "$boot_network" "$payload_sha"
         printf '    initrd %s\n' "$grub_initramfs"
         printf '}\n'
-    } > "$custom_cfg"
+    } > "$custom_tmp"
     # GRUB reads the filesystem directly and ignores these bits, so tightening
     # them costs nothing; on a vfat ESP the chmod simply cannot take effect.
-    chmod 0600 "$custom_cfg" 2>/dev/null || true
+    chmod 0600 "$custom_tmp" 2>/dev/null || true
+    if [ -e "$install_dir" ]; then
+        mv -- "$install_dir" "$stage_backup/payload"
+    fi
+    stage_published=true
+    mv -- "$stage_work" "$install_dir"
+    custom_changed=true
+    mv -f -- "$custom_tmp" "$custom_cfg"
     log "Reinstall entry written to $custom_cfg"
 
     # Select the entry for the next boot only. As a persistent GRUB_DEFAULT it
@@ -1451,6 +1554,9 @@ stage_main() (
         die 'Required command not found: grub-reboot (or grub2-reboot)'
     "$grub_reboot" archi >/dev/null 2>&1 ||
         die "Could not select the reinstall entry for the next boot: $grub_reboot archi"
+    stage_committed=true
+    rm -rf -- "$stage_backup"
+    stage_backup=''
     log "Reinstall entry selected for the next boot only, via $grub_reboot"
 
     sync
@@ -1544,6 +1650,7 @@ installer_main() (
     need_cmd mkfs.ext4
     need_cmd mount
     need_cmd numfmt
+    need_cmd pacman
     need_cmd pacman-key
     need_cmd pacstrap
     need_cmd partprobe
@@ -1700,12 +1807,30 @@ installer_main() (
     if command -v ntpd >/dev/null 2>&1; then
         ntpd -q -p "$ntp" || warn "Could not synchronize time with $ntp; using the current system clock"
     fi
-    # Building the keyring is tens of seconds of gpg work in the Alpine tmpfs and
-    # touches nothing on the target, so it overlaps with the wipe, the
-    # partitioning and the mkfs. It is waited for before pacstrap needs it.
+    packages=''
+    # cpio is kept explicitly so the installed Arch system can stage another
+    # reinstall run; mkinitcpio itself no longer pulls it in.
+    packages="base $kernel grub openssh sudo qemu-guest-agent
+        inetutils bash-completion wget curl vim nano cpio"
+    [ "$fail2ban" = true ] && packages="$packages fail2ban nftables"
+    [ "$firmware" = true ] && packages="$packages linux-firmware"
+    if [ "$boot_mode" = efi ]; then packages="$packages efibootmgr"; fi
+    case $(awk -F: '/vendor_id/ {gsub(/[[:space:]]/, "", $2); print $2; exit}' /proc/cpuinfo) in
+        GenuineIntel) packages="$packages intel-ucode" ;;
+        AuthenticAMD) packages="$packages amd-ucode" ;;
+    esac
+    packages="$packages $extra_packages"
+    # Every package token was validated before it reached this point.
+    # shellcheck disable=SC2086
+    set -- $packages
+
     log 'Initializing the Arch Linux package-signing keyring'
-    { pacman-key --init && pacman-key --populate archlinux; } >/tmp/archi-keyring.log 2>&1 &
-    keyring_pid=$!
+    if ! { pacman-key --init && pacman-key --populate archlinux; } >/tmp/archi-keyring.log 2>&1; then
+        cat /tmp/archi-keyring.log
+        die 'Could not build the Arch package-signing keyring'
+    fi
+    log 'Checking all packages and dependencies before erasing the disk'
+    preflight_packages "$@"
 
     log "ERASING and partitioning $disk"
     swapoff -a 2>/dev/null || true
@@ -1742,34 +1867,17 @@ installer_main() (
         mount "$boot_partition" /mnt/boot
     fi
 
-    packages=''
-    # cpio is kept explicitly so the installed Arch system can stage another
-    # reinstall run; mkinitcpio itself no longer pulls it in.
-    packages="base $kernel grub openssh sudo qemu-guest-agent
-        inetutils bash-completion wget curl vim nano cpio"
-    [ "$fail2ban" = true ] && packages="$packages fail2ban nftables"
-    [ "$firmware" = true ] && packages="$packages linux-firmware"
-    if [ "$boot_mode" = efi ]; then packages="$packages efibootmgr"; fi
-    case $(awk -F: '/vendor_id/ {gsub(/[[:space:]]/, "", $2); print $2; exit}' /proc/cpuinfo) in
-        GenuineIntel) packages="$packages intel-ucode" ;;
-        AuthenticAMD) packages="$packages amd-ucode" ;;
-    esac
-    packages="$packages $extra_packages"
-    # Every package token was validated before it reached this point.
-    # shellcheck disable=SC2086
-    set -- $packages
-
     install -d -m 0755 /mnt/etc
     printf 'KEYMAP=us\n' > /mnt/etc/vconsole.conf
     chmod 0644 /mnt/etc/vconsole.conf
 
-    wait "$keyring_pid" || { cat /tmp/archi-keyring.log; die 'Could not build the Arch package-signing keyring'; }
-    log 'Arch Linux package-signing keyring is ready'
-
     log "Installing packages: $*"
+    # Keep pacstrap's default target cache (/mnt/var/cache/pacman/pkg).
+    # -c would use Alpine's RAM-backed host cache and exhaust small machines.
+    # Leave downloaded packages in place so retries can reuse them.
     pacstrap_ok=false
     for _ in 1 2 3; do
-        if yes | pacstrap -c /mnt "$@"; then
+        if yes | pacstrap /mnt "$@"; then
             pacstrap_ok=true
             break
         fi
@@ -1938,15 +2046,10 @@ installer_main() (
         install -d -m 0755 /mnt/etc/udev/rules.d
         ln -sfn /dev/null /mnt/etc/udev/rules.d/80-net-setup-link.rules
     fi
+    # GRUB must see the selected kernel's nonempty initramfs when generating
+    # its entries, including when pacstrap's hook did not produce the image.
+    ensure_target_initramfs /mnt "$kernel"
     arch-chroot /mnt grub-mkconfig -o /boot/grub/grub.cfg
-    # pacstrap's mkinitcpio hook already built these, and /etc/vconsole.conf was
-    # in place before pacstrap ran so that build is complete. Rebuilding costs
-    # another half minute, but skipping it blindly would leave an unbootable
-    # system if the hook ever did not fire, so check instead of assuming.
-    if ! ls /mnt/boot/initramfs-*.img >/dev/null 2>&1; then
-        warn 'No initramfs was generated during pacstrap; building it now'
-        arch-chroot /mnt mkinitcpio -P
-    fi
 
     if [ -x /mnt/usr/bin/qemu-ga ]; then
         arch-chroot /mnt systemctl enable qemu-guest-agent.service
