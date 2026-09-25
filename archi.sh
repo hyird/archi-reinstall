@@ -13,7 +13,7 @@ umask 077
 # Functions use POSIX subshell bodies where variable isolation is required.
 
 readonly ARCHI_PAYLOAD_ID='archi-network-reinstall-v1'
-readonly ARCHI_VERSION='0.11.2'
+readonly ARCHI_VERSION='0.13.0'
 readonly ARCHI_RAW_URL='https://raw.githubusercontent.com/hyird/archi-reinstall/main/archi.sh'
 ARCHI_SOURCE_FILE=$0
 readonly DEFAULT_ALPINE_MIRROR='https://dl-cdn.alpinelinux.org/alpine'
@@ -80,17 +80,15 @@ usage() (
         printf '  --ntp time.cloudflare.com    NTP host (default: time.cloudflare.com).\n'
         printf '  --port 22                    SSH port (default: 22).\n'
         printf '  --install "git htop"         Install extra official packages.\n'
-        printf '  --kernel linux               Kernel package: linux or linux-lts (default:\n'
-        printf '                               linux-lts).\n'
-        printf '  --firmware                   Also install the linux-firmware bundle.\n'
+        printf '  --kernel linux               Kernel package: linux (default) or linux-lts.\n'
+        printf '  --firmware                   Install firmware even in a virtual machine.\n'
         printf '  --boot-mode efi              Force bios or efi instead of autodetecting.\n'
         printf '  --grub-timeout 5             Installed GRUB menu timeout in seconds.\n'
-        printf '  --log-days 15                Days of systemd journal to keep (default: 15,\n'
+        printf '  --log-days 15                Days of systemd journal to keep (default: 0,\n'
         printf '                               0 leaves journald'\''s own defaults).\n'
-        printf '  --ethx, --no-ethx            Rename interfaces to eth0 (default) or keep the\n'
-        printf '                               predictable names.\n'
-        printf '  --bbr, --no-bbr              Enable TCP BBR (default) or leave the defaults.\n'
-        printf '  --no-fail2ban                Do not install the default SSH jail.\n'
+        printf '  --ethx, --no-ethx            Force eth0 names or keep predictable names (default).\n'
+        printf '  --bbr, --no-bbr              Enable TCP BBR or leave defaults (default).\n'
+        printf '  --fail2ban, --no-fail2ban    Enable or omit the SSH jail (default).\n'
         printf '  --swap 1024                  Swap file size in MiB (default: 0, disabled).\n'
         printf '  --mirror https://mirrors.cloud.tencent.com/archlinux\n'
         printf '                               Arch mirror root; repository path is appended.\n'
@@ -98,7 +96,8 @@ usage() (
         printf '                               Alpine mirror root for the temporary environment.\n'
         printf '  --tuna, --ustc, --aliyun     Use a regional mirror preset.\n'
         printf '  --tencent                    Use the Tencent Cloud mirror preset.\n'
-        printf '  --hold                       Boot Alpine with SSH, but do not wipe.\n'
+        printf '  --hold 1                     Boot Alpine with SSH, but do not wipe.\n'
+        printf '  --hold 2                     Install Arch, but stay in Alpine with /mnt mounted.\n'
         printf '  --dry-run                    Validate and print the plan without changing files.\n'
         printf '  --cleanup                    Remove the staged GRUB entry and downloaded files.\n'
         printf '  --help                       Show this help.\n'
@@ -479,6 +478,7 @@ build_alpine_initramfs() (
     original=$1 destination=$2 authorized_key=$3 hostname=$4 ssh_port=$5 dns=$6
     alpine_mirror=$7 password_hash=$8 source_file=$9 config_file=${10}
     work='' apkovl='' overlay='' apkovl_archive='' overlay_archive='' overlay_cpio='' archive_list=''
+    apk_index='' apk_package='' apk_version='' package_root='' early_password_hash=''
     dns_server='' shadow_last_change=''
     permit_root_login='' password_auth='' shadow_password='*'
     # sshd_auth_mode emits exactly two whitespace-free fields.
@@ -501,6 +501,67 @@ build_alpine_initramfs() (
     mkdir -p -- "$overlay" "$apkovl/etc/apk" "$apkovl/etc/ssh/sshd_config.d" \
         "$apkovl/etc/archi" "$apkovl/root/.ssh"
 
+    # The regular sshd starts as soon as Alpine switches to archi-init. Keep a
+    # small SSH server in the initramfs too: if Alpine fails before switch_root,
+    # there must still be a way to read its diagnostics remotely.
+    apk_index=$work/APKINDEX.tar.gz
+    package_root=$work/early-ssh-packages
+    mkdir -p -- "$package_root" "$overlay/usr/bin" "$overlay/usr/sbin" \
+        "$overlay/usr/lib" "$overlay/archi-early-auth" "$overlay/root/.ssh"
+    download_file "$alpine_mirror/latest-stable/main/x86_64/APKINDEX.tar.gz" "$apk_index" 1000
+    for apk_package in dropbear utmps-libs skalibs-libs; do
+        apk_version=$(tar -xzOf "$apk_index" APKINDEX | awk -v pkg="$apk_package" \
+            '$0 == "P:" pkg { found=1; next } found && /^V:/ { print substr($0, 3); exit }')
+        [ -n "$apk_version" ] || die "Alpine package not found: $apk_package"
+        download_file "$alpine_mirror/latest-stable/main/x86_64/$apk_package-$apk_version.apk" \
+            "$work/$apk_package.apk" 1000
+        tar -xzf "$work/$apk_package.apk" -C "$package_root"
+    done
+    cp -a -- "$package_root/usr/bin/dropbearkey" "$overlay/usr/bin/"
+    cp -a -- "$package_root/usr/sbin/dropbear" "$overlay/usr/sbin/"
+    cp -a -- "$package_root/usr/lib"/libutmps.so.* "$overlay/usr/lib/"
+    cp -a -- "$package_root/usr/lib"/libskarnet.so.* "$overlay/usr/lib/"
+    gzip -dc "$original" | cpio --quiet -i --to-stdout init > "$work/official-init"
+    [ -s "$work/official-init" ] || die 'Could not read Alpine initramfs init'
+    grep -q '^# early console?$' "$work/official-init" ||
+        die 'Alpine initramfs network hook changed; refusing an unsafe patch'
+    grep -q '^# switch over to new root$' "$work/official-init" ||
+        die 'Alpine initramfs switch_root hook changed; refusing an unsafe patch'
+    grep -q '^exec switch_root ' "$work/official-init" ||
+        die 'Alpine initramfs switch_root command changed; refusing an unsafe patch'
+    awk '
+        /^# early console\?$/ {
+            print "# Keep PID 1 alive if Alpine setup fails before switch_root."
+            print "trap '\''archi_rc=$?; trap - EXIT; echo \"[archi] initramfs setup failed (exit $archi_rc); early SSH remains available.\" > /dev/console; while :; do sleep 60; done'\'' EXIT"
+            print "[ ! -x /archi-early-ssh ] || /archi-early-ssh"
+        }
+        /^# switch over to new root$/ {
+            print "# The old initramfs account files disappear at switch_root. Stop"
+            print "# its listener before the new root starts OpenSSH on the same port."
+            print "if [ -f /run/archi-early-ssh.pid ]; then"
+            print "    kill \"$(cat /run/archi-early-ssh.pid)\" 2>/dev/null || true"
+            print "fi"
+            print "if [ -f /tmp/archi-early-ssh.log ]; then"
+            print "    mkdir -p \"$sysroot/tmp\""
+            print "    cp /tmp/archi-early-ssh.log \"$sysroot/tmp/archi-early-ssh.log\""
+            print "fi"
+        }
+        /^exec switch_root / { after_switch=1 }
+        after_switch && /^\[ "\$KOPT_splash" != "no" \]/ {
+            print "# switch_root failed; restore early SSH for remote diagnosis."
+            print "[ ! -x /archi-early-ssh ] || /archi-early-ssh"
+            after_switch=0
+        }
+        { print }
+        END {
+            print "# Never let PID 1 exit after a failed switch_root or recovery shell."
+            print "echo \"[archi] switch_root failed; initramfs SSH remains available.\""
+            print "while :; do sleep 60; done"
+        }
+    ' \
+        "$work/official-init" > "$overlay/init"
+    chmod 0755 "$overlay/init"
+
     # The single list archi-init hands to "apk add". An /etc/apk/world of our
     # own used to sit next to it: init=/root/archi-init means OpenRC never runs
     # and never acts on world, but "apk add" solves against it, so the two lists
@@ -518,14 +579,15 @@ build_alpine_initramfs() (
         printf 'e2fsprogs\n'
         printf 'findmnt\n'
         printf 'gnupg\n'
+        printf 'grub\n'
         printf 'lsblk\n'
         printf 'mount\n'
         printf 'openssh\n'
         printf 'parted\n'
-        printf 'sgdisk\n'
         printf 'tzdata\n'
         printf 'util-linux-misc\n'
         printf 'umount\n'
+        printf 'virt-what\n'
         printf 'wipefs\n'
     } > "$apkovl/etc/archi/apk-packages"
     cp -f -- "$config_file" "$apkovl/etc/archi/config"
@@ -541,6 +603,19 @@ build_alpine_initramfs() (
         printf 'sshd:x:22:\n'
     } > "$apkovl/etc/group"
     printf 'root:%s:%s:0:99999:7:::\n' "$shadow_password" "$shadow_last_change" > "$apkovl/etc/shadow"
+    printf 'root:x:0:0:root:/root:/bin/sh\n' > "$overlay/archi-early-auth/passwd"
+    cp -f -- "$apkovl/etc/group" "$overlay/archi-early-auth/group"
+    early_password_hash=$shadow_password
+    if [ "$early_password_hash" = '*' ]; then
+        # Dropbear refuses even public-key login to a locked account. Give its
+        # temporary root account an unknown password hash and disable password
+        # authentication below when a key was supplied.
+        early_password_hash=$(hash_password "$(head -c 32 /dev/urandom | base64)")
+    fi
+    printf 'root:%s:%s:0:99999:7:::\n' "$early_password_hash" "$shadow_last_change" \
+        > "$overlay/archi-early-auth/shadow"
+    chmod 0700 "$overlay/archi-early-auth"
+    chmod 0600 "$overlay/archi-early-auth/shadow"
     # Alpine 3.24 installs alpine-base's default fstab late in initramfs-init.
     # Without our own fstab it then tries to relocate the already-consumed
     # embedded apkovl and emits misleading df/stat warnings on the console.
@@ -574,7 +649,30 @@ build_alpine_initramfs() (
         "$ssh_port" "$permit_root_login" "$password_auth"
     if [ -n "$authorized_key" ]; then
         printf '%s\n' "$authorized_key" > "$apkovl/root/.ssh/authorized_keys"
+        cp -f -- "$apkovl/root/.ssh/authorized_keys" "$overlay/archi-early-auth/authorized_keys"
     fi
+    {
+        printf '#!/bin/sh\n'
+        printf 'mkdir -p /run /etc/dropbear /root/.ssh\n'
+        printf 'cp /archi-early-auth/passwd /etc/passwd\n'
+        printf 'cp /archi-early-auth/group /etc/group\n'
+        printf 'cp /archi-early-auth/shadow /etc/shadow\n'
+        printf 'printf "/bin/sh\\n" > /etc/shells\n'
+        printf 'chmod 0600 /etc/shadow\n'
+        printf 'if [ -f /archi-early-auth/authorized_keys ]; then\n'
+        printf '    cp /archi-early-auth/authorized_keys /root/.ssh/authorized_keys\n'
+        printf '    chmod 0700 /root /root/.ssh\n'
+        printf '    chmod 0600 /root/.ssh/authorized_keys\n'
+        printf 'fi\n'
+        if [ -n "$authorized_key" ]; then
+            printf '/usr/sbin/dropbear -F -s -R -E -p %s >> /tmp/archi-early-ssh.log 2>&1 &\n' "$ssh_port"
+        else
+            printf '/usr/sbin/dropbear -F -R -E -p %s >> /tmp/archi-early-ssh.log 2>&1 &\n' "$ssh_port"
+        fi
+        printf 'echo $! > /run/archi-early-ssh.pid\n'
+        printf 'echo "[archi] Early SSH listener started on port %s" > /dev/console\n' "$ssh_port"
+    } > "$overlay/archi-early-ssh"
+    chmod 0700 "$overlay/archi-early-ssh"
     cp -f -- "$source_file" "$apkovl/root/archi.sh"
     {
         printf '#!/bin/sh\n'
@@ -1085,15 +1183,15 @@ stage_main() (
     requested_ip=''
     requested_gateway=''
     ssh_port=22
-    bbr=true fail2ban=true firmware=false ethx=true
-    kernel='linux-lts'
+    bbr=false fail2ban=false firmware=auto ethx=false
+    kernel='linux'
     extra_packages=''
     swap_mib=0
     boot_mode='auto'
     grub_timeout=5
-    log_days=15
+    log_days=0
     install_dir=$DEFAULT_INSTALL_DIR
-    hold=false
+    hold=0
     dry_run=false cleanup=false
     source_tmp='' authorized_key_tmp='' config_tmp='' password_file=''
     source_file=$ARCHI_SOURCE_FILE
@@ -1105,7 +1203,7 @@ stage_main() (
             --aliyun) alpine_mirror=$ALIYUN_ALPINE_MIRROR; package_mirror=$ALIYUN_PACKAGE_MIRROR; dns='223.5.5.5 223.6.6.6'; ntp='time.amazonaws.cn'; shift ;;
             --ustc) alpine_mirror=$USTC_ALPINE_MIRROR; package_mirror=$USTC_PACKAGE_MIRROR; dns='119.29.29.29 223.5.5.5'; ntp='time.amazonaws.cn'; shift ;;
             --tuna) alpine_mirror=$TUNA_ALPINE_MIRROR; package_mirror=$TUNA_PACKAGE_MIRROR; dns='119.29.29.29 223.5.5.5'; ntp='time.amazonaws.cn'; shift ;;
-            --tencent) alpine_mirror=$TENCENT_ALPINE_MIRROR; package_mirror=$TENCENT_PACKAGE_MIRROR; dns='119.29.29.29'; ntp='time.amazonaws.cn'; shift ;;
+            --tencent) alpine_mirror=$TENCENT_ALPINE_MIRROR; package_mirror=$TENCENT_PACKAGE_MIRROR; dns=''; ntp='time.amazonaws.cn'; shift ;;
             --mirror) package_mirror="$(trim_trailing_slash "${2:?missing value}")/\$repo/os/\$arch"; shift 2 ;;
             --alpine-mirror) alpine_mirror=${2:?missing value}; shift 2 ;;
             # The long spellings stay accepted so that commands written against
@@ -1144,7 +1242,12 @@ stage_main() (
             --log-days) log_days=${2:?missing value}; shift 2 ;;
             --install) extra_packages=${2:?missing value}; shift 2 ;;
             --swap|--swap-mib) swap_mib=${2:?missing value}; shift 2 ;;
-            --hold) hold=true; shift ;;
+            --hold)
+                case ${2-} in
+                    1|2) hold=$2; shift 2 ;;
+                    *) hold=1; shift ;;
+                esac
+                ;;
             --dry-run) dry_run=true; shift ;;
             --cleanup) cleanup=true; shift ;;
             --version) printf '%s\n' "$ARCHI_VERSION"; return 0 ;;
@@ -1234,6 +1337,8 @@ stage_main() (
     case $disk in /dev/*) ;; *) die 'Target disk must be under /dev' ;; esac
     [ -b "$disk" ] || die "Target disk is not a block device: $disk"
     [ "$(lsblk -ndo TYPE "$disk")" = disk ] || die "Target is not a whole disk: $disk"
+    disk_ptuuid=$(lsblk -ndo PTUUID "$disk" | tr -d '[:space:]')
+    [ -n "$disk_ptuuid" ] || die "Target disk has no partition-table UUID: $disk"
 
     if [ "$boot_mode" = auto ]; then
         if [ -d /sys/firmware/efi ]; then boot_mode=efi; else boot_mode=bios; fi
@@ -1325,7 +1430,12 @@ stage_main() (
     fi
 
     printf '[archi] Installation plan\n'
-    printf '  target disk:       %s (WILL BE ERASED AFTER REBOOT)\n' "$disk"
+    if [ "$hold" = 1 ]; then
+        printf '  target disk:       %s (HOLD: NO WIPE)\n' "$disk"
+    else
+        printf '  target disk:       %s (WILL BE ERASED AFTER REBOOT)\n' "$disk"
+    fi
+    printf '  disk PTUUID:       %s\n' "$disk_ptuuid"
     printf '  boot mode:         %s\n' "$boot_mode"
     printf '  hostname:          %s\n' "$hostname"
     printf '  installer hostname: alpine\n'
@@ -1348,12 +1458,34 @@ stage_main() (
     printf '  GRUB timeout:      %ss\n' "$grub_timeout"
     printf '  journal retention: %s days\n' "$log_days"
     printf '  extra packages:    %s\n' "${extra_packages:-none}"
-    printf '  hold before wipe:  %s\n' "$hold"
+    printf '  hold mode:         %s\n' "$hold"
     printf '  stage directory:   %s\n' "$install_dir"
     if [ "$dry_run" = true ]; then
         log 'Dry run completed; no files or boot settings were changed'
         return 0
     fi
+
+    grub_cfg=$(find_grub_cfg) ||
+        die 'Could not find a grub.cfg containing boot entries'
+    grub_cfg_reads_custom "$grub_cfg" ||
+        die "This GRUB configuration does not source custom.cfg: $grub_cfg"
+    custom_cfg="$(dirname "$grub_cfg")/custom.cfg"
+    grubenv_path="$(dirname "$grub_cfg")/grubenv"
+    grubenv_mount=$(findmnt -n -o TARGET --target "$grub_cfg") ||
+        die 'Could not find the filesystem containing GRUB'
+    grubenv_uuid=$(findmnt -n -o UUID --target "$grub_cfg") ||
+        die 'Could not identify the GRUB filesystem'
+    grubenv_fstype=$(findmnt -n -o FSTYPE --target "$grub_cfg") ||
+        die 'Could not identify the GRUB filesystem type'
+    grubenv_fsroot=$(findmnt -n -o FSROOT --target "$grub_cfg") ||
+        die 'Could not identify the GRUB filesystem root'
+    [ -n "$grubenv_uuid" ] || die 'GRUB filesystem has no UUID'
+    case $grubenv_mount in
+        /) grubenv_relative=${grubenv_path#/} ;;
+        *) grubenv_relative=${grubenv_path#"$grubenv_mount"/} ;;
+    esac
+    [ "$grubenv_relative" != "$grubenv_path" ] || die 'Could not map grubenv into its filesystem'
+    grubenv_disk_path="${grubenv_fsroot%/}/$grubenv_relative"
 
     need_cmd cpio
     need_cmd find
@@ -1384,8 +1516,9 @@ stage_main() (
         */*) [ -n "$boot_gateway" ] || { boot_cidr=''; boot_gateway=''; } ;;
         *) boot_cidr=''; boot_gateway='' ;;
     esac
-    hold_flag=0
-    [ "$hold" = true ] && hold_flag=1
+    console_args=$(tr ' ' '\n' </proc/cmdline | grep '^console=' | tr '\n' ' ' || true)
+    printf '%s' "$console_args" | LC_ALL=C grep -Eq '^[A-Za-z0-9_=,./:+ -]*$' ||
+        die 'Invalid console argument in source kernel command line'
 
     # Everything the Alpine side needs, carried inside the apkovl. See the
     # ARCHI_CONFIG_FILE comment for why none of this belongs on the cmdline.
@@ -1393,6 +1526,10 @@ stage_main() (
     write_installer_config "$config_tmp" \
         version "$ARCHI_VERSION" \
         disk "$disk" \
+        disk_ptuuid "$disk_ptuuid" \
+        grubenv_uuid "$grubenv_uuid" \
+        grubenv_fstype "$grubenv_fstype" \
+        grubenv_disk_path "$grubenv_disk_path" \
         hostname "$hostname" \
         timezone "$timezone" \
         dns "$dns" \
@@ -1404,10 +1541,11 @@ stage_main() (
         ntp "$ntp" \
         boot_mode "$boot_mode" \
         swap_mib "$swap_mib" \
-        hold "$hold_flag" \
+        hold "$hold" \
         boot_cidr "$boot_cidr" \
         gateway "$boot_gateway" \
         boot_mac "$boot_mac" \
+        console_args "$console_args" \
         ssh_port "$ssh_port" \
         bbr "$bbr" \
         fail2ban "$fail2ban" \
@@ -1426,14 +1564,28 @@ stage_main() (
     chmod 0600 "$stage_work/initramfs-virt" 2>/dev/null || true
 
     grub_prefix='' grub_stage_dir='' grub_kernel='' grub_initramfs=''
+    grub_fsroot=''
     if mountpoint -q /boot; then
         grub_prefix=''
     else
         grub_prefix='/boot'
     fi
     grub_stage_dir=${install_dir#/boot}
-    grub_kernel="$grub_prefix$grub_stage_dir/vmlinuz-virt"
-    grub_initramfs="$grub_prefix$grub_stage_dir/initramfs-virt"
+    # GRUB resolves paths from the filesystem root when btrfs_relative_path=n.
+    # A Linux /boot inside a Btrfs subvolume therefore needs its FSROOT prefix
+    # (for example /@rootfs/boot), even though Linux sees /boot directly.
+    boot_fstype=$(findmnt -n -o FSTYPE --target "$stage_work" 2>/dev/null || true)
+    if [ "$boot_fstype" = btrfs ]; then
+        grub_fsroot=$(findmnt -n -o FSROOT --target "$stage_work") ||
+            die 'Could not find the Btrfs subvolume containing the staged kernel'
+        case $grub_fsroot in
+            /) grub_fsroot='' ;;
+            /*) ;;
+            *) die "Unexpected Btrfs filesystem root: $grub_fsroot" ;;
+        esac
+    fi
+    grub_kernel="$grub_fsroot$grub_prefix$grub_stage_dir/vmlinuz-virt"
+    grub_initramfs="$grub_fsroot$grub_prefix$grub_stage_dir/initramfs-virt"
 
     {
         printf 'ARCHI_PAYLOAD_ID=%s\n' "$ARCHI_PAYLOAD_ID"
@@ -1468,11 +1620,6 @@ stage_main() (
     # since it was last run, and it fails outright when something like os-prober
     # errors out. Sourcing custom.cfg is part of the grub.cfg already on disk, so
     # nothing else has to be touched.
-    grub_cfg=$(find_grub_cfg) ||
-        die 'Could not find a grub.cfg containing boot entries'
-    grub_cfg_reads_custom "$grub_cfg" ||
-        die "This GRUB configuration does not source custom.cfg: $grub_cfg"
-    custom_cfg="$(dirname "$grub_cfg")/custom.cfg"
     stage_backup=$(mktemp -d "${install_dir}.backup.XXXXXX")
     if [ -e "$custom_cfg" ]; then
         cp -p -- "$custom_cfg" "$stage_backup/custom.cfg"
@@ -1487,7 +1634,6 @@ stage_main() (
     fi
 
     boot_fstype='' grub_insmod='' grub_btrfs_path=''
-    boot_fstype=$(findmnt -n -o FSTYPE --target "$stage_work" 2>/dev/null || true)
     for grub_fs in $(grub_fs_module "$boot_fstype"); do
         grub_insmod="$grub_insmod    insmod $grub_fs
 "
@@ -1562,7 +1708,11 @@ stage_main() (
     sync
     log 'Arch reinstall entry is staged successfully'
     log 'It remains reversible until reboot: archi.sh --cleanup'
-    log 'Rebooting into Alpine; the selected disk will be erased'
+    if [ "$hold" = 1 ]; then
+        log 'Rebooting into Alpine hold mode; target partitions will not be changed'
+    else
+        log 'Rebooting into Alpine; the selected disk will be erased'
+    fi
     # systemd denies the request while logind is still starting up, and some
     # minimal images do not run systemd at all. Falling back matters here: by
     # this point everything is staged, so giving up would strand the machine
@@ -1629,6 +1779,33 @@ installer_exit() {
     exit "$INSTALLER_EXIT_STATUS"
 }
 
+# GRUB cannot reliably save an updated grubenv on Btrfs. Clear the one-shot
+# choice from Linux before any destructive work, so a held or failed run boots
+# the original system next time. The path is stored relative to the filesystem
+# root because /boot may live inside a Btrfs subvolume.
+clear_one_shot_boot() (
+    uuid=$1 fstype=$2 env_path=$3
+    case $uuid in ''|*[!A-Fa-f0-9-]*) die 'Invalid GRUB filesystem UUID' ;; esac
+    case $env_path in /*) ;; *) die 'Invalid GRUB environment path' ;; esac
+    case $env_path in *'/../'*|*'/./'*|*'//'*) die 'Invalid GRUB environment path' ;; esac
+    mount_dir=$(mktemp -d /tmp/archi-grubenv.XXXXXX)
+    trap 'umount "$mount_dir" 2>/dev/null || true; rmdir "$mount_dir" 2>/dev/null || true' 0
+    if [ "$fstype" = btrfs ]; then
+        mount -t btrfs -o rw,subvolid=5 "UUID=$uuid" "$mount_dir" ||
+            die 'Could not mount the original Btrfs boot filesystem'
+    else
+        mount -t "$fstype" -o rw "UUID=$uuid" "$mount_dir" ||
+            die 'Could not mount the original GRUB filesystem'
+    fi
+    [ -f "$mount_dir$env_path" ] || die "GRUB environment file is missing: $env_path"
+    grub-editenv "$mount_dir$env_path" unset next_entry ||
+        die 'Could not clear the one-shot GRUB selection'
+    if grub-editenv "$mount_dir$env_path" list | grep -q '^next_entry='; then
+        die 'One-shot GRUB selection is still present'
+    fi
+    log 'Cleared the one-shot GRUB selection on the original system'
+)
+
 installer_main() (
     log_file=/tmp/archi-install.log
     setup_installer_logging "$log_file"
@@ -1643,23 +1820,28 @@ installer_main() (
     need_cmd base64
     need_cmd blockdev
     need_cmd curl
+    need_cmd dd
     need_cmd genfstab
+    need_cmd grub-editenv
     need_cmd killall
     need_cmd lsblk
     need_cmd mdev
     need_cmd mkfs.ext4
+    need_cmd mkswap
     need_cmd mount
     need_cmd numfmt
     need_cmd pacman
     need_cmd pacman-key
     need_cmd pacstrap
+    need_cmd parted
     need_cmd partprobe
     need_cmd pidof
     need_cmd reboot
-    need_cmd sgdisk
     need_cmd sha256sum
     need_cmd swapoff
+    need_cmd swapon
     need_cmd umount
+    need_cmd virt-what
     need_cmd wipefs
     need_cmd yes
 
@@ -1670,12 +1852,17 @@ installer_main() (
         [ "$actual_sha" = "$expected_sha" ] ||
         die "Installer payload checksum mismatch (expected $expected_sha, got $actual_sha)"
 
-    disk='' hostname='' timezone='' dns='' authorized_key='' password_hash='' package_mirror='' extra_packages='' kernel='' ntp=''
-    boot_mode='' swap_mib='' hold='' boot_cidr='' boot_gateway='' boot_mac=''
+    disk='' disk_ptuuid='' grubenv_uuid='' grubenv_fstype='' grubenv_disk_path=''
+    hostname='' timezone='' dns='' authorized_key='' password_hash='' package_mirror='' extra_packages='' kernel='' ntp=''
+    boot_mode='' swap_mib='' hold='' boot_cidr='' boot_gateway='' boot_mac='' console_args=''
     ssh_port='' bbr='' fail2ban='' firmware='' ethx='' grub_timeout='' log_days=''
     [ -r "$ARCHI_CONFIG_FILE" ] ||
         die "Installer configuration is missing: $ARCHI_CONFIG_FILE"
     disk=$(config_value disk)
+    disk_ptuuid=$(config_value disk_ptuuid)
+    grubenv_uuid=$(config_value grubenv_uuid)
+    grubenv_fstype=$(config_value grubenv_fstype)
+    grubenv_disk_path=$(config_value grubenv_disk_path)
     hostname=$(config_value hostname)
     timezone=$(config_value timezone)
     dns=$(config_value dns)
@@ -1691,6 +1878,7 @@ installer_main() (
     boot_cidr=$(config_value boot_cidr)
     boot_gateway=$(config_value gateway)
     boot_mac=$(config_value boot_mac)
+    console_args=$(config_value console_args)
     ssh_port=$(config_value ssh_port)
     bbr=$(config_value bbr)
     fail2ban=$(config_value fail2ban)
@@ -1704,6 +1892,9 @@ installer_main() (
     validate_dns_servers "$dns"
     case $disk in /dev/*) [ -b "$disk" ] || die "Target disk is unavailable: $disk" ;; *) die "Target disk is unavailable: $disk" ;; esac
     [ "$(lsblk -ndo TYPE "$disk")" = disk ] || die "Target is not a whole disk: $disk"
+    actual_ptuuid=$(lsblk -ndo PTUUID "$disk" | tr -d '[:space:]')
+    [ -n "$disk_ptuuid" ] && [ "$actual_ptuuid" = "$disk_ptuuid" ] ||
+        die "Target disk identity changed across reboot: $disk"
     case $boot_mode in bios|efi) ;; *) die "Invalid boot mode: $boot_mode" ;; esac
     [ "$boot_mode" != efi ] || need_cmd mkfs.fat
     validate_uint_range 'swap size' "$swap_mib" 1048576
@@ -1715,9 +1906,9 @@ installer_main() (
     validate_port "$ssh_port"
     case $bbr in true|false) ;; *) die 'Invalid BBR setting' ;; esac
     case $fail2ban in true|false) ;; *) die 'Invalid Fail2ban setting' ;; esac
-    case $firmware in true|false) ;; *) die 'Invalid firmware setting' ;; esac
+    case $firmware in auto|true|false) ;; *) die 'Invalid firmware setting' ;; esac
     case $ethx in true|false) ;; *) die 'Invalid ethx setting' ;; esac
-    case $hold in 0|1) ;; *) die 'Invalid hold setting' ;; esac
+    case $hold in 0|1|2) ;; *) die 'Invalid hold setting' ;; esac
     validate_uint_range 'GRUB timeout' "$grub_timeout" 60
     validate_uint_range 'journal retention' "$log_days" 3650
     validate_ntp_host "$ntp"
@@ -1748,6 +1939,8 @@ installer_main() (
         printf '%s\n' "$boot_mac" | LC_ALL=C grep -Eq '^([[:xdigit:]]{2}:){5}[[:xdigit:]]{2}$' ||
             die 'Invalid inherited network MAC address'
     fi
+    printf '%s' "$console_args" | LC_ALL=C grep -Eq '^[A-Za-z0-9_=,./:+ -]*$' ||
+        die 'Invalid console argument'
     validate_url 'package mirror' "$package_mirror"
 
     # Staging uses umask 077, but the installed operating system must inherit
@@ -1785,8 +1978,10 @@ installer_main() (
     printf '  Fail2ban:         %s\n' "$fail2ban"
     printf '  swap:             %s MiB\n' "$swap_mib"
 
+    clear_one_shot_boot "$grubenv_uuid" "$grubenv_fstype" "$grubenv_disk_path"
+
     if [ "$hold" = 1 ] && [ "${ARCHI_FORCE_INSTALL:-0}" != 1 ]; then
-        log 'Hold mode is active; no disk changes were made.'
+        log 'Hold mode is active; target partitions were not changed.'
         log 'SSH is available with the configured root authentication.'
         log 'To continue destructively: ARCHI_FORCE_INSTALL=1 /root/archi.sh'
         return 0
@@ -1794,7 +1989,7 @@ installer_main() (
 
     disk_size=''
     disk_size=$(blockdev --getsize64 "$disk")
-    [ "$disk_size" -ge 8589934592 ] || die 'Target disk must be at least 8 GiB'
+    [ "$disk_size" -ge 5368709120 ] || die 'Target disk must be at least 5 GiB'
     maximum_swap_mib=$((disk_size / 1048576 - 4096))
     [ "$swap_mib" -le "$maximum_swap_mib" ] ||
         die 'Swap size leaves less than 4 GiB for the installed system'
@@ -1807,19 +2002,27 @@ installer_main() (
     if command -v ntpd >/dev/null 2>&1; then
         ntpd -q -p "$ntp" || warn "Could not synchronize time with $ntp; using the current system clock"
     fi
-    packages=''
-    # cpio is kept explicitly so the installed Arch system can stage another
-    # reinstall run; mkinitcpio itself no longer pulls it in.
-    packages="base $kernel grub openssh sudo qemu-guest-agent
-        inetutils bash-completion wget curl vim nano cpio"
-    [ "$fail2ban" = true ] && packages="$packages fail2ban nftables"
-    [ "$firmware" = true ] && packages="$packages linux-firmware"
-    if [ "$boot_mode" = efi ]; then packages="$packages efibootmgr"; fi
-    case $(awk -F: '/vendor_id/ {gsub(/[[:space:]]/, "", $2); print $2; exit}' /proc/cpuinfo) in
-        GenuineIntel) packages="$packages intel-ucode" ;;
-        AuthenticAMD) packages="$packages amd-ucode" ;;
-    esac
-    packages="$packages $extra_packages"
+    # Match reinstall's Arch package order: bootstrap the minimal userland,
+    # generate C.UTF-8, then install firmware (on bare metal) and the kernel.
+    base_packages="base grub openssh e2fsprogs $extra_packages"
+    if [ "$boot_mode" = efi ]; then base_packages="$base_packages efibootmgr dosfstools"; fi
+    [ "$fail2ban" = true ] && base_packages="$base_packages fail2ban nftables"
+    firmware_packages=''
+    if [ "$firmware" != false ]; then
+        virtual_machine=false
+        if [ -n "$(virt-what 2>/dev/null)" ] ||
+            ls /sys/bus/virtio/devices/* >/dev/null 2>&1; then
+            virtual_machine=true
+        fi
+        if [ "$firmware" = true ] || [ "$virtual_machine" = false ]; then
+            firmware_packages=linux-firmware
+            case $(awk -F: '/vendor_id/ {gsub(/[[:space:]]/, "", $2); print $2; exit}' /proc/cpuinfo) in
+                GenuineIntel) firmware_packages="$firmware_packages intel-ucode" ;;
+                AuthenticAMD) firmware_packages="$firmware_packages amd-ucode" ;;
+            esac
+        fi
+    fi
+    packages="$base_packages $firmware_packages $kernel"
     # Every package token was validated before it reached this point.
     # shellcheck disable=SC2086
     set -- $packages
@@ -1835,18 +2038,26 @@ installer_main() (
     log "ERASING and partitioning $disk"
     swapoff -a 2>/dev/null || true
     wipefs --all --force "$disk"
-    sgdisk --zap-all "$disk"
-
-    boot_partition='' root_partition=''
-    boot_partition=$(partition_path "$disk" 1)
-    root_partition=$(partition_path "$disk" 2)
+    boot_partition='' root_partition='' root_partition_number=1
     if [ "$boot_mode" = efi ]; then
-        sgdisk --new=1:1MiB:+512MiB --typecode=1:ef00 --change-name=1:EFI \
-            --new=2:0:0 --typecode=2:8304 --change-name=2:ROOT "$disk"
+        parted -s "$disk" -- mklabel gpt \
+            mkpart ESP fat32 1MiB 101MiB \
+            mkpart ROOT ext4 101MiB 100% \
+            set 1 esp on
+        root_partition_number=2
+    elif [ "$disk_size" -gt 2199023255552 ]; then
+        parted -s "$disk" -- mklabel gpt \
+            mkpart BIOSBOOT ext4 1MiB 2MiB \
+            mkpart ROOT ext4 2MiB 100% \
+            set 1 bios_grub on
+        root_partition_number=2
     else
-        sgdisk --new=1:1MiB:+2MiB --typecode=1:ef02 --change-name=1:BIOSBOOT \
-            --new=2:0:0 --typecode=2:8304 --change-name=2:ROOT "$disk"
+        parted -s "$disk" -- mklabel msdos \
+            mkpart primary ext4 1MiB 100% \
+            set 1 boot on
     fi
+    boot_partition=$(partition_path "$disk" 1)
+    root_partition=$(partition_path "$disk" "$root_partition_number")
     for _ in 1 2 3 4 5 6 7 8 9 10; do
         partprobe "$disk" 2>/dev/null || true
         mdev -s 2>/dev/null || true
@@ -1863,21 +2074,38 @@ installer_main() (
     if [ "$boot_mode" = efi ]; then
         [ -b "$boot_partition" ] || die "EFI partition did not appear: $boot_partition"
         mkfs.fat -F 32 -n ARCH_EFI "$boot_partition"
-        install -d /mnt/boot
-        mount "$boot_partition" /mnt/boot
+        install -d /mnt/efi
+        mount "$boot_partition" /mnt/efi
+    fi
+
+    # reinstall temporarily raises available memory to 1 GiB for pacstrap,
+    # then removes the swap file rather than keeping it in the new system.
+    temporary_swap_mib=0
+    mem_mib=$(awk '/^MemTotal:/ {print int($2 / 1024)}' /proc/meminfo)
+    if [ "$mem_mib" -lt 1024 ]; then
+        temporary_swap_mib=$((1024 - mem_mib))
+        log "Creating ${temporary_swap_mib} MiB temporary installation swap"
+        dd if=/dev/zero of=/mnt/.archi-install-swap bs=1M count="$temporary_swap_mib" status=none
+        chmod 0600 /mnt/.archi-install-swap
+        mkswap /mnt/.archi-install-swap
+        swapon /mnt/.archi-install-swap
     fi
 
     install -d -m 0755 /mnt/etc
     printf 'KEYMAP=us\n' > /mnt/etc/vconsole.conf
     chmod 0644 /mnt/etc/vconsole.conf
 
-    log "Installing packages: $*"
+    # Only the base package set is installed before the locale is generated.
+    # mkinitcpio's kernel hook then runs under a configured C.UTF-8 locale.
+    # shellcheck disable=SC2086
+    set -- $base_packages
+    log "Installing base packages: $*"
     # Keep pacstrap's default target cache (/mnt/var/cache/pacman/pkg).
     # -c would use Alpine's RAM-backed host cache and exhaust small machines.
     # Leave downloaded packages in place so retries can reuse them.
     pacstrap_ok=false
     for _ in 1 2 3; do
-        if yes | pacstrap /mnt "$@"; then
+        if yes | pacstrap -K /mnt "$@"; then
             pacstrap_ok=true
             break
         fi
@@ -1888,7 +2116,7 @@ installer_main() (
     done
     [ "$pacstrap_ok" = true ] || die 'pacstrap failed after three attempts'
     chmod 0755 /mnt/etc
-    genfstab -U /mnt > /mnt/etc/fstab
+    genfstab -U /mnt | sed '/\.archi-install-swap/d' > /mnt/etc/fstab
     chmod 0644 /mnt/etc/fstab
     cp -Lf /etc/resolv.conf /mnt/etc/resolv.conf
     chmod 0644 /mnt/etc/resolv.conf
@@ -1905,10 +2133,17 @@ installer_main() (
     fi
 
     ln -sf "/usr/share/zoneinfo/$timezone" /mnt/etc/localtime
-    arch-chroot /mnt hwclock --systohc
-    sed -i -E 's/^#(en_US\.UTF-8 UTF-8)/\1/' /mnt/etc/locale.gen
+    printf 'C.UTF-8 UTF-8\n' >> /mnt/etc/locale.gen
     arch-chroot /mnt locale-gen
-    printf 'LANG=en_US.UTF-8\n' > /mnt/etc/locale.conf
+    printf 'LANG=C.UTF-8\n' > /mnt/etc/locale.conf
+    # Booted images should get a fresh machine identity on first start.
+    : > /mnt/etc/machine-id
+    if [ -n "$firmware_packages" ]; then
+        # shellcheck disable=SC2086
+        arch-chroot /mnt pacman -Syu --noconfirm $firmware_packages
+    fi
+    arch-chroot /mnt pacman -Syu --noconfirm "$kernel"
+    arch-chroot /mnt ssh-keygen -A
     printf '%s\n' "$hostname" > /mnt/etc/hostname
     {
         printf '127.0.0.1 localhost\n'
@@ -1916,14 +2151,6 @@ installer_main() (
         printf '127.0.1.1 %s\n' "$hostname"
     } > /mnt/etc/hosts
     chmod 0644 /mnt/etc/locale.conf /mnt/etc/hostname /mnt/etc/hosts
-
-    install -d -m 0755 /mnt/etc/modprobe.d
-    {
-        printf '# archi.sh supports wired cloud networking only. Avoid loading the wireless\n'
-        printf '# regulatory stack and its firmware database on machines without Wi-Fi.\n'
-        printf 'blacklist cfg80211\n'
-    } > /mnt/etc/modprobe.d/60-archi-cloud.conf
-    chmod 0644 /mnt/etc/modprobe.d/60-archi-cloud.conf
 
     if [ "$log_days" -gt 0 ]; then
         install -d -m 0755 /mnt/etc/systemd/journald.conf.d
@@ -1972,9 +2199,12 @@ installer_main() (
             printf '\n'
             printf '[Network]\n'
             printf 'Address=%s\n' "$boot_cidr"
-            printf 'Gateway=%s\n' "$boot_gateway"
             printf 'IPv6AcceptRA=yes\n'
             printf '%s\n' "${dns:+DNS=$dns}"
+            printf '\n[Route]\n'
+            printf 'Destination=0.0.0.0/0\n'
+            printf 'Gateway=%s\n' "$boot_gateway"
+            printf 'GatewayOnLink=yes\n'
         } > /mnt/etc/systemd/network/20-wired.network
     else
         {
@@ -1990,6 +2220,8 @@ installer_main() (
     chmod 0644 /mnt/etc/systemd/network/20-wired.network
     arch-chroot /mnt systemctl enable systemd-networkd.service systemd-resolved.service \
         systemd-timesyncd.service sshd.service
+    rm -f -- /mnt/etc/resolv.conf
+    ln -s /run/systemd/resolve/stub-resolv.conf /mnt/etc/resolv.conf
 
     if [ -n "$authorized_key" ]; then
         install -d -m 0700 /mnt/root/.ssh
@@ -2027,8 +2259,10 @@ installer_main() (
     fi
 
     if [ "$boot_mode" = efi ]; then
-        arch-chroot /mnt grub-install --target=x86_64-efi --efi-directory=/boot \
-            --bootloader-id=ARCH --removable --no-nvram
+        arch-chroot /mnt grub-install --target=x86_64-efi --efi-directory=/efi \
+            --bootloader-id=ARCH
+        arch-chroot /mnt grub-install --target=x86_64-efi --efi-directory=/efi \
+            --bootloader-id=ARCH --removable
     else
         arch-chroot /mnt grub-install --target=i386-pc --recheck "$disk"
     fi
@@ -2036,6 +2270,10 @@ installer_main() (
         -e "s/^GRUB_TIMEOUT=.*/GRUB_TIMEOUT=$grub_timeout/" \
         -e 's/^GRUB_TIMEOUT_STYLE=.*/GRUB_TIMEOUT_STYLE=menu/' \
         /mnt/etc/default/grub
+    if [ -n "$console_args" ]; then
+        printf 'GRUB_CMDLINE_LINUX="$GRUB_CMDLINE_LINUX %s"\n' "$console_args" \
+            >> /mnt/etc/default/grub
+    fi
     if grep -qE '^#?GRUB_DISABLE_OS_PROBER=' /mnt/etc/default/grub; then
         sed -i -E 's/^#?GRUB_DISABLE_OS_PROBER=.*/GRUB_DISABLE_OS_PROBER=true/' \
             /mnt/etc/default/grub
@@ -2051,10 +2289,14 @@ installer_main() (
     ensure_target_initramfs /mnt "$kernel"
     arch-chroot /mnt grub-mkconfig -o /boot/grub/grub.cfg
 
+    if [ "$temporary_swap_mib" -gt 0 ]; then
+        swapoff /mnt/.archi-install-swap
+        rm -f -- /mnt/.archi-install-swap
+    fi
+
     if [ -x /mnt/usr/bin/qemu-ga ]; then
         arch-chroot /mnt systemctl enable qemu-guest-agent.service
     fi
-    ln -sfn /run/systemd/resolve/stub-resolv.conf /mnt/etc/resolv.conf
 
     cp -f -- "$log_file" /mnt/root/archi-install.log
     cp -f -- "$ARCHI_SOURCE_FILE" /mnt/root/archi.sh
@@ -2075,9 +2317,14 @@ installer_main() (
         sleep 1
     fi
     pidof gpg-agent >/dev/null 2>&1 && die 'Temporary gpg-agent is still running'
+    if [ "$hold" = 2 ]; then
+        sync
+        log 'Arch Linux installation completed; hold mode keeps /mnt mounted and Alpine online'
+        return 0
+    fi
     sync
     target='' unmounted=''
-    for target in /mnt/boot /mnt; do
+    for target in /mnt/efi /mnt; do
         grep -qsE "[[:space:]]${target}[[:space:]]" /proc/mounts || continue
         unmounted=false
         for _ in 1 2 3 4 5; do

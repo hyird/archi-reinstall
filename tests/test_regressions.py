@@ -135,23 +135,28 @@ printf old > "$stage_backup/custom.cfg"''' if previous else ':')
         boot = self.root / 'boot'
         boot.mkdir()
         (boot / 'initramfs-linux.img').write_text('unrelated')
+        mock = self.root / 'arch-chroot'
+        self.env['PATH'] = str(self.root) + os.pathsep + os.environ['PATH']
         for rebuild in ['return 1', ':', 'printf image > "$1/boot/initramfs-linux-lts.img"']:
-            result = self.shell('arch-chroot() { ' + rebuild + '; }\n'
-                                'ensure_target_initramfs "$TEST_ROOT" linux-lts')
+            mock.write_text('#!/bin/sh\n' + rebuild + '\n')
+            mock.chmod(0o755)
+            result = self.shell('ensure_target_initramfs "$TEST_ROOT" linux-lts')
             self.assertEqual(result.returncode == 0, rebuild.startswith('printf'), result.stderr)
-        result = self.shell('arch-chroot() { return 99; }\n'
-                            'ensure_target_initramfs "$TEST_ROOT" linux-lts')
-        self.assertEqual(result.returncode, 0, result.stderr)
+        (boot / 'initramfs-linux-lts.img').unlink()
+        mock.write_text('#!/bin/sh\nexit 99\n')
+        result = self.shell('ensure_target_initramfs "$TEST_ROOT" linux-lts')
+        self.assertNotEqual(result.returncode, 0, result.stderr)
 
     def test_install_retry_reuses_target_cache(self):
         # Exercise the installer's actual retry block with a fake pacstrap.
         # Model its documented -c behavior and fail after the first download.
-        start = SOURCE.index('    log "Installing packages: $*"')
+        start = SOURCE.index('    log "Installing base packages: $*"')
         end = SOURCE.index('    chmod 0755 /mnt/etc', start)
         retry = SOURCE[start:end].replace('/mnt', '${TEST_ROOT}/target')
         result = self.shell('''
 pacstrap() {
     cache=$TEST_ROOT/host-cache
+    if [ "$1" = -K ]; then shift; fi
     if [ "$1" = -c ]; then
         shift
     else

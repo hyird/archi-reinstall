@@ -2,6 +2,8 @@
 
 `archi.sh` 通过 GRUB 和 Alpine 临时环境，将 x86_64 云主机或物理机重装为最小化 Arch Linux。脚本使用 POSIX `sh` 语法，通过 `pacstrap` 从 Arch 仓库直接安装，不使用预制镜像。下载的软件包使用 Arch Linux 官方密钥环验证签名。
 
+脚本是单个 `sh` 文件，只提供 Arch 目标系统。流程参考 [bin456789/reinstall](https://github.com/bin456789/reinstall) 的临时环境、GRUB 引导和磁盘身份校验做法：在原系统下载官方 Alpine 内核与 initramfs，写入一次性 GRUB 入口；进入 Alpine 后先核对脚本、磁盘 PTUUID 和安装计划，再清除 GRUB 的一次性选择、检查 Arch 软件包，最后才擦盘并安装。Alpine 阶段的安装逻辑和配置都打包在同一个文件生成的 initramfs 中，不依赖运行时下载其他脚本。
+
 > [!CAUTION]
 > 安装会清空目标磁盘。请确认登录凭据和磁盘无误后再执行。
 
@@ -32,21 +34,22 @@ sh /tmp/archi.sh --ssh-key /root/.ssh/authorized_keys
 | `--dns 1.1.1.1` | 继承当前配置，否则 `1.1.1.1 1.0.0.1` | 设置 DNS 服务器 |
 | `--ntp ntp.aliyun.com` | `time.cloudflare.com` | 设置 NTP 服务器 |
 | `--port 22` | `22` | 设置 SSH 端口 |
-| `--no-ethx` | `eth0` 命名已开启 | 保留 `ens3` 之类的可预测网卡名 |
+| `--ethx` | 保留可预测网卡名 | 强制使用 `eth0` 命名；默认通过 MAC 匹配网卡 |
 | `--install "git htop"` | — | 安装额外官方仓库软件包 |
-| `--kernel linux` | `linux-lts` | 选择内核软件包，可选 `linux` 或 `linux-lts` |
-| `--firmware` | 关闭 | 额外安装 `linux-firmware` 固件包 |
+| `--kernel linux-lts` | `linux` | 选择内核软件包，可选 `linux` 或 `linux-lts` |
+| `--firmware` | 仅物理机自动安装 | 在虚拟机中也安装 `linux-firmware` 与适用的微码包 |
 | `--boot-mode efi` | 自动探测 | 强制使用 `bios` 或 `efi` |
 | `--grub-timeout 5` | `5` | 新系统 GRUB 菜单等待秒数 |
-| `--log-days 15` | `15` | systemd 日志保留天数，`0` 表示沿用 journald 默认 |
-| `--no-bbr` | BBR 已开启 | 不启用 BBR 和高并发网络参数 |
-| `--no-fail2ban` | Fail2ban 已开启 | 不安装 Fail2ban 与 nftables SSH 防护 |
-| `--swap 1024` | `0` | 创建 1024 MiB swap 文件 |
+| `--log-days 15` | `0` | 设置 systemd 日志保留天数；默认沿用 journald 设置 |
+| `--bbr` | 关闭 | 启用 BBR 和高并发网络参数 |
+| `--fail2ban` | 关闭 | 安装 Fail2ban 与 nftables SSH 防护 |
+| `--swap 1024` | `0` | 在新系统中保留 1024 MiB swap 文件；内存不足 1 GiB 时会另外创建安装期间的临时 swap |
 | `--mirror https://mirrors.cloud.tencent.com/archlinux` | Arch 官方镜像 | 设置 Arch 镜像根地址 |
 | `--alpine-mirror https://mirrors.ustc.edu.cn/alpine` | Alpine 官方镜像 | 设置临时环境使用的 Alpine 镜像根地址 |
 | `--tuna` / `--ustc` / `--aliyun` / `--tencent` | 关闭 | 使用中国大陆镜像和网络服务 |
 | `--dry-run` | 关闭 | 只检查并显示安装计划 |
-| `--hold` | 关闭 | 进入 Alpine 后等待手动确认，不擦盘 |
+| `--hold 1` | 关闭 | 只进入 Alpine，不擦盘；`--hold` 等同于 `--hold 1` |
+| `--hold 2` | 关闭 | 完成安装后停留在 Alpine，新系统保持挂载在 `/mnt` |
 
 `--ethx`、`--bbr`、`--fail2ban`、`--firmware` 都有对应的 `--no-` 反向开关，可用于覆盖前面的镜像预设。
 
@@ -98,11 +101,13 @@ tail -f /tmp/archi-install.log
 
 Alpine 临时环境也会在 VGA 控制台和串口上提供登录提示，因此云厂商的 VNC 界面显示的是正常的 Alpine 登录界面，登录后按提示查看日志即可。安装过程不会向控制台刷屏。
 
-使用 `--hold` 时不会擦盘。确认后在 Alpine 中继续：
+使用 `--hold` 时会清除旧系统中的一次性 GRUB 选择，但不会擦盘。确认后在 Alpine 中继续：
 
 ```sh
 ARCHI_FORCE_INSTALL=1 /root/archi.sh
 ```
+
+默认 Arch 安装顺序与 `reinstall` 的 Arch 路径一致：先安装最小化的 `base grub openssh e2fsprogs`，生成 `C.UTF-8` 语言环境，再安装 `linux` 内核；物理机安装固件和对应 CPU 微码，虚拟机默认跳过。BIOS 且磁盘不超过 2 TiB 时使用 MBR 与单个 ext4 根分区；较大的 BIOS 磁盘使用 GPT 加 BIOS boot 分区；UEFI 使用 GPT、100 MiB EFI 分区（挂载到 `/efi`）和 ext4 根分区。低于 1 GiB 内存时会创建仅供安装使用的临时 swap，安装完成后删除。额外软件和系统调优均为显式选项。
 
 安装失败时不会自动重启。成功日志保存在新系统的 `/root/archi-install.log`。
 
@@ -120,7 +125,7 @@ ARCHI_FORCE_INSTALL=1 /root/archi.sh
 sh /tmp/archi.sh --cleanup
 ```
 
-重装入口只对**下一次启动**生效（通过 `grub-reboot` 设置），不会成为持久的默认项。因此安装失败或使用 `--hold` 后再次重启，会回到原有系统而不是重新进入 Alpine 擦盘。
+重装入口通过 `grub-reboot` 选择下一次启动。由于 GRUB 在 Btrfs 上不一定能写回 `grubenv`，Alpine 成功启动并完成校验后会在 Linux 中主动清除 `next_entry`。此后安装失败或使用 `--hold 1` 后再次重启，会回到原有系统。
 
 入口以 `custom.cfg` 的形式写在 grub.cfg 同目录下，**不会重新生成现有的 grub.cfg**。若该目录下原本已有 `custom.cfg`，会先备份为 `custom.cfg.archi-orig`，`--cleanup` 时还原。
 
@@ -130,7 +135,8 @@ sh /tmp/archi.sh --cleanup
 
 - 仅支持 x86_64、GRUB 2、有线 IPv4、BIOS 或 UEFI
 - 至少 8 GiB 磁盘，建议至少 512 MiB 内存
-- 仅支持单块磁盘、GPT 和 ext4
+- 目标磁盘使用 MBR 或 GPT，以及 ext4；原系统可以将 `/boot` 放在 Btrfs 子卷中
+- 原磁盘必须有 PTUUID；进入 Alpine 后会再次核对，避免设备名变化时擦错盘
 - 不支持 LVM、RAID、磁盘加密、无线网络或容器
 - 重要环境请先使用 `--dry-run` 或在虚拟机中测试
 
